@@ -3,6 +3,11 @@
 Validated on 2026-09-20 against the unmodified evaluator at NetArena commit
 [`525ca6a80fce5a8faef508b70137fbd0513a85cb`](https://github.com/Froot-NetSys/NetArena/commit/525ca6a80fce5a8faef508b70137fbd0513a85cb).
 
+The published linux/amd64 participant image is pinned as
+`ghcr.io/onejumpinc/netarena-malt-agent@sha256:3e25cf0da8a2494eb2b5d26c50667ee7d23d6cfec6b2dd48302011f4bdd98455`.
+Its [build and A2A smoke-test workflow](https://github.com/onejumpinc/netarena-agentbeats/actions/runs/35499755035)
+completed successfully.
+
 ## Full regenerated assessment
 
 - Seed: `20260926`
