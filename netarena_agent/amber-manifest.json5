@@ -10,7 +10,7 @@
 
   program: {
     // Immutable linux/amd64 image built by the linked public workflow.
-    image: "ghcr.io/onejumpinc/netarena-malt-agent@sha256:bce530b806a897598c55015e5d3f3b07941a95855dd0aa1aac468a32169663e5",
+    image: "ghcr.io/onejumpinc/netarena-malt-agent@sha256:694cec1ea7a026c7011dab2b6b7cd96ab578c9144d8fe273e6e9fb562e197ec1",
     entrypoint: "python -m netarena_agent.server --host 0.0.0.0 --port 8001",
     env: {
       PYTHONUNBUFFERED: "1",
