@@ -42,6 +42,9 @@ uv run --isolated --no-project \
 `250` queries for each of the ten templates produces the same 2,500-query
 scale used by the full public submission configuration.
 
+See the reproducible [validation record](VALIDATION.md) for the full 2,500-case
+result and the A2A prompt-envelope matrix.
+
 With the A2A server running, exercise every official zero-shot, few-shot, base,
 and chain-of-thought prompt envelope end to end:
 
