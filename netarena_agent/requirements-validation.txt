@@ -1,4 +1,5 @@
 a2a-sdk[http-server]==0.3.24
+orjson>=3.10.0
 uvicorn[standard]==0.41.0
 cattrs>=25.3.0
 httpx>=0.28.1

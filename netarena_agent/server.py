@@ -1,43 +1,21 @@
-"""Expose the deterministic MALT compiler through the A2A protocol."""
+"""Expose the deterministic MALT compiler through blocking A2A JSON-RPC."""
 
 from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Mapping
+from typing import Any
 
+import orjson
 import uvicorn
-from a2a.server.agent_execution import AgentExecutor, RequestContext
-from a2a.server.apps import A2AStarletteApplication
-from a2a.server.events import EventQueue
-from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Task, UnsupportedOperationError
-from a2a.utils import new_agent_text_message
-from a2a.utils.errors import ServerError
 
 from .compiler import QueryParseError, compile_response
 
 UNSUPPORTED_RESPONSE = "Unsupported NetArena MALT request."
-
-
-class NetArenaExecutor(AgentExecutor):
-    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        request = context.get_user_input()
-        try:
-            response = compile_response(request)
-        except QueryParseError:
-            # Keep failure behavior explicit. Returning guessed executable code
-            # or reflecting request text could let the evaluator's permissive
-            # code extractor execute attacker-controlled content.
-            response = UNSUPPORTED_RESPONSE
-        await event_queue.enqueue_event(
-            new_agent_text_message(response, context_id=context.context_id)
-        )
-
-    async def cancel(
-        self, context: RequestContext, event_queue: EventQueue
-    ) -> Task | None:
-        raise ServerError(error=UnsupportedOperationError())
+_AGENT_CARD_PATH = "/.well-known/agent-card.json"
+_MAX_REQUEST_BYTES = 1_048_576
+_JSON_CONTENT_TYPE = (b"content-type", b"application/json")
 
 
 def _card_url(host: str, port: int, explicit: str | None) -> str:
@@ -52,36 +30,163 @@ def _card_url(host: str, port: int, explicit: str | None) -> str:
     return f"http://{host}:{port}/"
 
 
-def build_app(host: str = "0.0.0.0", port: int = 8001, card_url: str | None = None):
-    skill = AgentSkill(
-        id="netarena_malt_compile",
-        name="NetArena MALT Graph Compiler",
-        description="Compiles controlled-language data-center graph requests into auditable Python",
-        tags=["netarena", "malt", "network", "graph", "deterministic"],
-        examples=[],
-    )
-    card = AgentCard(
-        name="onejump-netarena-malt-agent",
-        description="Deterministic and safety-aware participant for NetArena MALT",
-        url=_card_url(host, port, card_url),
-        version="1.2.0",
-        default_input_modes=["text/plain"],
-        default_output_modes=["text/plain"],
-        # Every MALT request has exactly one deterministic response. Advertising
-        # streaming makes the official client and the Amber proxy negotiate an
-        # SSE connection for a single message, adding avoidable packet/flush
-        # latency. The A2A client automatically uses blocking JSON-RPC when the
-        # card declares that streaming is unsupported.
-        capabilities=AgentCapabilities(streaming=False),
-        skills=[skill],
-    )
-    return A2AStarletteApplication(
-        agent_card=card,
-        http_handler=DefaultRequestHandler(
-            agent_executor=NetArenaExecutor(),
-            task_store=InMemoryTaskStore(),
-        ),
-    ).build()
+def _agent_card(host: str, port: int, card_url: str | None) -> dict[str, Any]:
+    return {
+        "capabilities": {"streaming": False},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+        "description": "Deterministic and safety-aware participant for NetArena MALT",
+        "name": "onejump-netarena-malt-agent",
+        "preferredTransport": "JSONRPC",
+        "protocolVersion": "0.3.0",
+        "skills": [
+            {
+                "description": (
+                    "Compiles controlled-language data-center graph requests into "
+                    "auditable Python"
+                ),
+                "examples": [],
+                "id": "netarena_malt_compile",
+                "name": "NetArena MALT Graph Compiler",
+                "tags": ["netarena", "malt", "network", "graph", "deterministic"],
+            }
+        ],
+        "url": _card_url(host, port, card_url),
+        "version": "1.3.0",
+    }
+
+
+class FastA2AApplication:
+    """Minimal ASGI implementation of the two A2A operations MALT uses.
+
+    The benchmark fetches the public Agent Card once, then sends independent
+    ``message/send`` calls. A general task store and event queue only add work
+    here: every request deterministically produces one complete Message. This
+    fast path preserves the A2A wire schema while avoiding that machinery.
+    """
+
+    def __init__(self, card: Mapping[str, Any]) -> None:
+        self._card = orjson.dumps(card)
+
+    async def __call__(self, scope: dict, receive, send) -> None:
+        scope_type = scope["type"]
+        if scope_type == "lifespan":
+            while True:
+                event = await receive()
+                if event["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif event["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+
+        if scope_type != "http":
+            return
+
+        method = scope["method"]
+        path = scope["path"]
+        if method == "GET" and path == _AGENT_CARD_PATH:
+            await self._send(send, 200, self._card)
+            return
+        if method != "POST" or path != "/":
+            await self._send(send, 404, b'{"detail":"Not Found"}')
+            return
+
+        event = await receive()
+        if event["type"] == "http.disconnect":
+            return
+        body = event.get("body", b"")
+        if event.get("more_body", False):
+            chunks = [body]
+            while True:
+                event = await receive()
+                if event["type"] == "http.disconnect":
+                    return
+                chunks.append(event.get("body", b""))
+                if not event.get("more_body", False):
+                    break
+            body = b"".join(chunks)
+
+        rpc_id: str | int | None = None
+        try:
+            if len(body) > _MAX_REQUEST_BYTES:
+                raise ValueError("request too large")
+            request = orjson.loads(body)
+            if not isinstance(request, dict):
+                raise TypeError("request must be an object")
+            rpc_id = request.get("id")
+            if (
+                request.get("jsonrpc") != "2.0"
+                or request.get("method") != "message/send"
+                or not isinstance(rpc_id, (str, int))
+            ):
+                raise ValueError("invalid JSON-RPC envelope")
+
+            params = request.get("params")
+            message = params.get("message") if isinstance(params, dict) else None
+            parts = message.get("parts") if isinstance(message, dict) else None
+            if not isinstance(parts, list):
+                raise TypeError("message parts must be a list")
+
+            texts = [
+                part["text"]
+                for part in parts
+                if isinstance(part, dict)
+                and part.get("kind") == "text"
+                and isinstance(part.get("text"), str)
+            ]
+            if not texts:
+                raise ValueError("a text part is required")
+            prompt = texts[0] if len(texts) == 1 else "\n".join(texts)
+
+            try:
+                answer = compile_response(prompt)
+            except QueryParseError:
+                answer = UNSUPPORTED_RESPONSE
+
+            # The incoming JSON-RPC id is already unique for every official
+            # client call, so it can safely identify this one response Message.
+            payload = orjson.dumps(
+                {
+                    "id": rpc_id,
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "kind": "message",
+                        "messageId": str(rpc_id),
+                        "parts": [{"kind": "text", "text": answer}],
+                        "role": "agent",
+                    },
+                }
+            )
+            await self._send(send, 200, payload)
+        except (KeyError, TypeError, ValueError, orjson.JSONDecodeError):
+            payload = orjson.dumps(
+                {
+                    "id": rpc_id,
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                }
+            )
+            await self._send(send, 200, payload)
+
+    @staticmethod
+    async def _send(send, status: int, body: bytes) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    _JSON_CONTENT_TYPE,
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def build_app(
+    host: str = "0.0.0.0", port: int = 8001, card_url: str | None = None
+) -> FastA2AApplication:
+    return FastA2AApplication(_agent_card(host, port, card_url))
 
 
 def main() -> int:

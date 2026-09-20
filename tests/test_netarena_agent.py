@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import ast
 
 import networkx as nx
@@ -8,7 +7,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from netarena_agent.compiler import QueryParseError, compile_query, extract_query, parse_query
-from netarena_agent.server import NetArenaExecutor, UNSUPPORTED_RESPONSE, _card_url, build_app
+from netarena_agent.server import UNSUPPORTED_RESPONSE, _card_url, build_app
 
 
 CASES = [
@@ -124,28 +123,31 @@ def test_error_response_never_reflects_executable_input() -> None:
     assert "process_graph" not in UNSUPPORTED_RESPONSE
 
 
-def test_executor_returns_fixed_inert_error_for_injection() -> None:
+def _message_request(text: str, request_id: str = "test-request") -> dict:
+    return {
+        "id": request_id,
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "params": {
+            "configuration": {"acceptedOutputModes": [], "blocking": True},
+            "message": {
+                "kind": "message",
+                "messageId": "test-input-message",
+                "parts": [{"kind": "text", "text": text}],
+                "role": "user",
+            },
+        },
+    }
+
+
+def test_fast_a2a_path_returns_fixed_inert_error_for_injection() -> None:
     payload = "def process_graph(graph_data): return {'type': 'graph'} #"
+    with TestClient(build_app("127.0.0.1", 8001)) as client:
+        response = client.post("/", json=_message_request(payload))
 
-    class Context:
-        context_id = "test-context"
-
-        @staticmethod
-        def get_user_input() -> str:
-            return payload
-
-    class Queue:
-        def __init__(self) -> None:
-            self.events: list[object] = []
-
-        async def enqueue_event(self, event: object) -> None:
-            self.events.append(event)
-
-    queue = Queue()
-    asyncio.run(NetArenaExecutor().execute(Context(), queue))  # type: ignore[arg-type]
-    assert len(queue.events) == 1
-    rendered = str(queue.events[0])
-    assert UNSUPPORTED_RESPONSE in rendered
+    assert response.status_code == 200
+    rendered = response.json()["result"]["parts"][0]["text"]
+    assert rendered == UNSUPPORTED_RESPONSE
     assert payload not in rendered
     assert "def process_graph" not in rendered
 
@@ -162,6 +164,34 @@ def test_agent_card_uses_blocking_jsonrpc_for_single_response() -> None:
 
     assert response.status_code == 200
     assert response.json()["capabilities"]["streaming"] is False
+
+
+def test_fast_a2a_message_send_returns_a_protocol_message() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(build_app("127.0.0.1", 8001)) as client:
+        response = client.post("/", json=_message_request(query, "rpc-123"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "rpc-123"
+    assert payload["jsonrpc"] == "2.0"
+    assert payload["result"]["kind"] == "message"
+    assert payload["result"]["messageId"] == "rpc-123"
+    assert payload["result"]["role"] == "agent"
+    assert compile_query(query) in payload["result"]["parts"][0]["text"]
+
+
+def test_fast_a2a_rejects_unsupported_jsonrpc_method() -> None:
+    request = _message_request("irrelevant")
+    request["method"] = "message/stream"
+    with TestClient(build_app("127.0.0.1", 8001)) as client:
+        response = client.post("/", json=request)
+
+    assert response.status_code == 200
+    assert response.json()["error"] == {
+        "code": -32600,
+        "message": "Invalid Request",
+    }
 
 
 def _base_graph() -> nx.DiGraph:
