@@ -47,8 +47,14 @@ jobs:
           trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
           python - <<'PY'
           import json
+          import asyncio
           import time
           import urllib.request
+          import uuid
+
+          import httpx
+          from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
+          from a2a.types import Message, Part, Role, TextPart
 
           url = "http://127.0.0.1:8001/.well-known/agent-card.json"
           for _ in range(30):
@@ -61,6 +67,36 @@ jobs:
                   time.sleep(1)
           else:
               raise SystemExit("A2A agent card did not become ready")
+
+          async def send_request():
+              async with httpx.AsyncClient(timeout=10) as http_client:
+                  card = await A2ACardResolver(
+                      httpx_client=http_client,
+                      base_url="http://127.0.0.1:8001/",
+                  ).get_agent_card()
+                  client = ClientFactory(
+                      ClientConfig(httpx_client=http_client, streaming=True)
+                  ).create(card)
+                  message = Message(
+                      kind="message",
+                      role=Role.user,
+                      parts=[Part(TextPart(kind="text", text=(
+                          "List all the child nodes of ju1.a1.m4. "
+                          "Return a list of child node names."
+                      )))],
+                      message_id=uuid.uuid4().hex,
+                  )
+                  last_event = None
+                  async for event in client.send_message(message):
+                      last_event = event
+                  rendered = (
+                      last_event.model_dump_json()
+                      if hasattr(last_event, "model_dump_json")
+                      else str(last_event)
+                  )
+                  assert "def process_graph" in rendered
+
+          asyncio.run(send_request())
           PY
 
   publish:
