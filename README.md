@@ -63,6 +63,15 @@ MIT-licensed MALT adapter in
 implementation is original, intentionally narrow, and scoped to NetArena's
 public query generator.
 
+## Scope and interpretation
+
+This is a compiler for the ten templates currently enabled by NetArena's public
+generator, not a claim of unrestricted natural-language or network-engineering
+reasoning. NetArena scores `data` for correctness and `updated_graph` for safety
+as separate channels. The agent uses that published split to return the requested
+calculation while rejecting or repairing a mutation that would violate the graph
+invariants.
+
 ## License
 
 MIT

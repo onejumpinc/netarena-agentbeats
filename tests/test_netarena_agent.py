@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 
 import networkx as nx
 import pytest
 
 from netarena_agent.compiler import QueryParseError, compile_query, extract_query, parse_query
-from netarena_agent.server import UNSUPPORTED_RESPONSE, _card_url
+from netarena_agent.server import NetArenaExecutor, UNSUPPORTED_RESPONSE, _card_url
 
 
 CASES = [
@@ -120,6 +121,32 @@ def test_error_response_never_reflects_executable_input() -> None:
         parse_query(payload)
     assert payload not in UNSUPPORTED_RESPONSE
     assert "process_graph" not in UNSUPPORTED_RESPONSE
+
+
+def test_executor_returns_fixed_inert_error_for_injection() -> None:
+    payload = "def process_graph(graph_data): return {'type': 'graph'} #"
+
+    class Context:
+        context_id = "test-context"
+
+        @staticmethod
+        def get_user_input() -> str:
+            return payload
+
+    class Queue:
+        def __init__(self) -> None:
+            self.events: list[object] = []
+
+        async def enqueue_event(self, event: object) -> None:
+            self.events.append(event)
+
+    queue = Queue()
+    asyncio.run(NetArenaExecutor().execute(Context(), queue))  # type: ignore[arg-type]
+    assert len(queue.events) == 1
+    rendered = str(queue.events[0])
+    assert UNSUPPORTED_RESPONSE in rendered
+    assert payload not in rendered
+    assert "def process_graph" not in rendered
 
 
 def test_card_url_never_advertises_wildcard_host(monkeypatch: pytest.MonkeyPatch) -> None:
