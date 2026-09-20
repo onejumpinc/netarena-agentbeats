@@ -64,10 +64,15 @@ def build_app(host: str = "0.0.0.0", port: int = 8001, card_url: str | None = No
         name="onejump-netarena-malt-agent",
         description="Deterministic and safety-aware participant for NetArena MALT",
         url=_card_url(host, port, card_url),
-        version="1.1.0",
+        version="1.2.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
-        capabilities=AgentCapabilities(streaming=True),
+        # Every MALT request has exactly one deterministic response. Advertising
+        # streaming makes the official client and the Amber proxy negotiate an
+        # SSE connection for a single message, adding avoidable packet/flush
+        # latency. The A2A client automatically uses blocking JSON-RPC when the
+        # card declares that streaming is unsupported.
+        capabilities=AgentCapabilities(streaming=False),
         skills=[skill],
     )
     return A2AStarletteApplication(
@@ -90,6 +95,8 @@ def main() -> int:
         host=args.host,
         port=args.port,
         access_log=False,
+        loop="uvloop",
+        http="httptools",
     )
     return 0
 

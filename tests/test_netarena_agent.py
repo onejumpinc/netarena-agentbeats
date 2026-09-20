@@ -5,9 +5,10 @@ import ast
 
 import networkx as nx
 import pytest
+from starlette.testclient import TestClient
 
 from netarena_agent.compiler import QueryParseError, compile_query, extract_query, parse_query
-from netarena_agent.server import NetArenaExecutor, UNSUPPORTED_RESPONSE, _card_url
+from netarena_agent.server import NetArenaExecutor, UNSUPPORTED_RESPONSE, _card_url, build_app
 
 
 CASES = [
@@ -153,6 +154,14 @@ def test_card_url_never_advertises_wildcard_host(monkeypatch: pytest.MonkeyPatch
     for name in ("AGENT_URL", "A2A_AGENT_URL", "PUBLIC_URL"):
         monkeypatch.delenv(name, raising=False)
     assert _card_url("0.0.0.0", 8001, None) == "http://127.0.0.1:8001/"
+
+
+def test_agent_card_uses_blocking_jsonrpc_for_single_response() -> None:
+    with TestClient(build_app("127.0.0.1", 8001)) as client:
+        response = client.get("/.well-known/agent-card.json")
+
+    assert response.status_code == 200
+    assert response.json()["capabilities"]["streaming"] is False
 
 
 def _base_graph() -> nx.DiGraph:

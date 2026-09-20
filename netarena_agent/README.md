@@ -4,6 +4,10 @@ This is a deterministic participant for the public
 [NetArena MALT benchmark](https://agentbeats.dev/agentbeater/netarena-malt-policy-benchmark).
 It compiles the benchmark's controlled English into the five graph helpers exposed
 by the evaluator. It uses no task IDs, answer table, model API, or benchmark seed.
+Because every request produces exactly one complete answer, the Agent Card
+advertises non-streaming operation. The official A2A client therefore uses a
+single blocking JSON-RPC exchange instead of opening an SSE stream for one
+message; this changes only transport overhead, not the returned program.
 
 The response separates two channels exposed by the evaluator:
 
