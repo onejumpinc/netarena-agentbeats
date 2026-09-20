@@ -23,6 +23,7 @@ correctness comparison.
 Run the targeted unit suite:
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m pytest tests/test_netarena_agent.py -q
 ```
 
