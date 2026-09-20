@@ -11,10 +11,13 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Task, UnsupportedOperationError
 from a2a.utils import new_agent_text_message
+from a2a.utils.errors import ServerError
 
 from .compiler import QueryParseError, compile_response
+
+UNSUPPORTED_RESPONSE = "Unsupported NetArena MALT request."
 
 
 class NetArenaExecutor(AgentExecutor):
@@ -22,16 +25,19 @@ class NetArenaExecutor(AgentExecutor):
         request = context.get_user_input()
         try:
             response = compile_response(request)
-        except QueryParseError as exc:
+        except QueryParseError:
             # Keep failure behavior explicit. Returning guessed executable code
-            # for an unknown operation could mutate the evaluator's graph.
-            response = f"Unsupported NetArena MALT request: {exc}"
+            # or reflecting request text could let the evaluator's permissive
+            # code extractor execute attacker-controlled content.
+            response = UNSUPPORTED_RESPONSE
         await event_queue.enqueue_event(
             new_agent_text_message(response, context_id=context.context_id)
         )
 
-    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        raise NotImplementedError
+    async def cancel(
+        self, context: RequestContext, event_queue: EventQueue
+    ) -> Task | None:
+        raise ServerError(error=UnsupportedOperationError())
 
 
 def _card_url(host: str, port: int, explicit: str | None) -> str:
@@ -41,6 +47,8 @@ def _card_url(host: str, port: int, explicit: str | None) -> str:
         value = os.environ.get(name, "").strip()
         if value:
             return value
+    if host in {"0.0.0.0", "::", ""}:
+        host = "127.0.0.1"
     return f"http://{host}:{port}/"
 
 
@@ -56,7 +64,7 @@ def build_app(host: str = "0.0.0.0", port: int = 8001, card_url: str | None = No
         name="onejump-netarena-malt-agent",
         description="Deterministic and safety-aware participant for NetArena MALT",
         url=_card_url(host, port, card_url),
-        version="1.0.0",
+        version="1.1.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         capabilities=AgentCapabilities(streaming=True),

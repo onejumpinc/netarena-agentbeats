@@ -5,15 +5,18 @@ This is a deterministic participant for the public
 It compiles the benchmark's controlled English into the five graph helpers exposed
 by the evaluator. It uses no task IDs, answer table, model API, or benchmark seed.
 
-The response separates two channels:
+The response separates two channels exposed by the evaluator:
 
 - `data` is the requested computation or hypothetical graph result.
 - `updated_graph` is the state safe to apply under NetArena's hierarchy,
   connectivity, and bandwidth checks.
 
 This matters when a generated request itself would create an invalid hierarchy or
-orphan nodes. The requested result remains inspectable, while an unsafe mutation
-is not committed.
+orphan nodes. Parent types and existence are checked against the graph at runtime.
+Invalid additions are rejected from the committed state; removals cascade through
+dependent descendants so the requested removal is applied without leaving orphan
+nodes. The requested result remains available for the benchmark's correctness
+comparison.
 
 ## Verify
 
@@ -33,6 +36,16 @@ uv run --isolated --no-project \
   --netarena-repo /path/to/NetArena \
   --num-each-type 250 \
   --seed 20260920
+```
+
+With the A2A server running, exercise every official zero-shot, few-shot, base,
+and chain-of-thought prompt envelope end to end:
+
+```bash
+python tools/run_netarena_a2a_validation.py \
+  --netarena-repo /path/to/NetArena \
+  --agent-url http://127.0.0.1:8001 \
+  --num-each-type 1
 ```
 
 ## Attribution

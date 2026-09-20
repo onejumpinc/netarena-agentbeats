@@ -57,6 +57,11 @@ def extract_query(prompt: str) -> str:
         if query:
             return query
 
+    # A scaffolded prompt that did not match must not fall through to the
+    # examples: several examples contain valid operations of their own.
+    if re.search(r"\b(?:Question|Answer)\s*:", text, flags=re.IGNORECASE):
+        raise QueryParseError("malformed benchmark prompt")
+
     # Direct A2A calls used during smoke tests may contain only the question.
     return text
 
@@ -81,7 +86,7 @@ def _new_node_type(node_name: str, explicit: str = "") -> str:
         return explicit.upper()
     match = re.search(r"new_(EK_[A-Z_]+?)(?:_\d+)?$", node_name, flags=re.IGNORECASE)
     if not match:
-        raise QueryParseError(f"cannot infer type for new node {node_name!r}")
+        raise QueryParseError("cannot infer new-node type")
     return match.group(1).upper()
 
 
@@ -163,7 +168,7 @@ def parse_query(prompt_or_query: str) -> Plan:
     if terminals > 1:
         raise QueryParseError("ambiguous MALT terminal operation")
     if not any((add, remove, count, list_parent, rank_parent)):
-        raise QueryParseError(f"unsupported MALT request: {query!r}")
+        raise QueryParseError("unsupported MALT request shape")
 
     return Plan(
         query=query,
@@ -173,29 +178,6 @@ def parse_query(prompt_or_query: str) -> Plan:
         list_parent=list_parent,
         rank_parent=rank_parent,
     )
-
-
-def _mutation_is_safe(plan: Plan) -> bool:
-    """Whether the requested mutation preserves the benchmark invariants.
-
-    Unsafe mutations are still evaluated as a dry run in ``data`` so the user
-    can inspect the requested result, but are not committed to
-    ``updated_graph``.  This makes the two output channels explicit:
-    requested computation versus safely applicable state.
-    """
-
-    if plan.remove:
-        return _node_type_from_name(plan.remove) == "EK_PORT"
-    if plan.add:
-        parent_type = _node_type_from_name(plan.add.parent)
-        return (
-            (plan.add.node_type == "EK_PORT" and parent_type == "EK_PACKET_SWITCH")
-            or (
-                plan.add.node_type == "EK_PACKET_SWITCH"
-                and parent_type in {"EK_AGG_BLOCK", "EK_CONTROL_DOMAIN"}
-            )
-        )
-    return True
 
 
 def compile_query(prompt_or_query: str) -> str:
@@ -210,20 +192,47 @@ def compile_query(prompt_or_query: str) -> str:
                 f"    new_node = {{'name': {plan.add.name!r}, 'type': {plan.add.node_type!r}}}",
                 f"    parent_node_name = {plan.add.parent!r}",
                 "    graph_copy = solid_step_add_node_to_graph(graph_copy, new_node, parent_node_name)",
+                "    parent_types = []",
+                "    for candidate_id, candidate_attrs in graph_data.nodes(data=True):",
+                "        if candidate_attrs.get('name') == parent_node_name:",
+                "            parent_types = candidate_attrs.get('type', [])",
+                "            break",
+                "    if isinstance(parent_types, str):",
+                "        parent_types = [parent_types]",
+                "    allowed_children = {",
+                "        'EK_JUPITER': ('EK_SPINEBLOCK', 'EK_SUPERBLOCK'),",
+                "        'EK_SPINEBLOCK': ('EK_PACKET_SWITCH',),",
+                "        'EK_SUPERBLOCK': ('EK_AGG_BLOCK',),",
+                "        'EK_AGG_BLOCK': ('EK_PACKET_SWITCH',),",
+                "        'EK_CHASSIS': ('EK_CONTROL_POINT', 'EK_PACKET_SWITCH'),",
+                "        'EK_CONTROL_POINT': ('EK_PACKET_SWITCH',),",
+                "        'EK_RACK': ('EK_CHASSIS',),",
+                "        'EK_PACKET_SWITCH': ('EK_PORT',),",
+                "        'EK_CONTROL_DOMAIN': ('EK_CONTROL_POINT', 'EK_PACKET_SWITCH'),",
+                "    }",
+                f"    mutation_safe = any({plan.add.node_type!r} in allowed_children.get(parent_type, ()) for parent_type in parent_types)",
+                "    graph_safe = graph_copy.copy() if mutation_safe else graph_data.copy()",
             ]
         )
     elif plan.remove:
         lines.extend(
             [
                 f"    child_node_name = {plan.remove!r}",
+                "    removed_descendants = set()",
+                "    for candidate_id, candidate_attrs in graph_data.nodes(data=True):",
+                "        if candidate_attrs.get('name') == child_node_name:",
+                "            removed_descendants = nx.descendants(graph_data, candidate_id)",
+                "            break",
                 "    graph_copy = solid_step_remove_node_from_graph(graph_copy, child_node_name)",
+                "    graph_safe = graph_copy.copy()",
+                "    graph_safe.remove_nodes_from(removed_descendants)",
             ]
         )
+    else:
+        lines.append("    graph_safe = graph_copy.copy()")
 
-    safe_source = "graph_copy" if _mutation_is_safe(plan) else "graph_data"
     lines.extend(
         [
-            f"    graph_safe = {safe_source}.copy()",
             "    graph_json = nx.readwrite.json_graph.node_link_data(graph_safe)",
         ]
     )

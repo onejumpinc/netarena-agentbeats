@@ -7,13 +7,16 @@ provided by the evaluator. It uses no task IDs, answer table, benchmark seed,
 model API, or external service.
 
 The participant treats the requested computation and the safely applicable
-state as separate output channels:
+state as separate output channels exposed by the evaluator:
 
 - `data` contains the requested result or hypothetical graph.
 - `updated_graph` contains the graph state that passes NetArena's safety rules.
 
-That distinction lets the evaluator inspect an unsafe requested mutation
-without committing it.
+Parent types and existence are checked against the graph at runtime. Invalid
+additions are rejected from the committed state; removals cascade through
+dependent descendants so the requested removal is applied without leaving
+orphan nodes. The requested result remains available for the benchmark's
+correctness comparison.
 
 ## Local checks
 
@@ -37,6 +40,16 @@ uv run --isolated --no-project \
 
 `250` queries for each of the ten templates produces the same 2,500-query
 scale used by the full public submission configuration.
+
+With the A2A server running, exercise every official zero-shot, few-shot, base,
+and chain-of-thought prompt envelope end to end:
+
+```bash
+python tools/run_netarena_a2a_validation.py \
+  --netarena-repo /path/to/NetArena \
+  --agent-url http://127.0.0.1:8001 \
+  --num-each-type 1
+```
 
 ## AgentBeats artifact
 

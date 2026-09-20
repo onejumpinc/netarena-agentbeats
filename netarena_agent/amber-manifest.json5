@@ -12,7 +12,12 @@
     // Replaced with a content digest by the publish workflow before submission.
     image: "ghcr.io/onejumpinc/netarena-malt-agent:codex-legal-agentbeats-100",
     entrypoint: "python -m netarena_agent.server --host 0.0.0.0 --port 8001",
-    env: { PYTHONUNBUFFERED: "1" },
+    env: {
+      PYTHONUNBUFFERED: "1",
+      // Amber components share a local network namespace. Never advertise the
+      // wildcard bind address as an A2A destination.
+      PUBLIC_URL: "http://127.0.0.1:8001/",
+    },
     network: {
       endpoints: [{ name: "a2a_endpoint", port: 8001 }],
     },
