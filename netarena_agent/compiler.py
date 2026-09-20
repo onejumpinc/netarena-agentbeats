@@ -16,6 +16,24 @@ IDENTIFIER = r"[A-Za-z0-9_.]+"
 NEW_NODE = r"new_[A-Za-z0-9_]+"
 NODE_TYPE = r"EK_[A-Z_]+"
 
+# The evaluator's hierarchy policy, inverted at compile time so each generated
+# program carries only the parent types relevant to its requested child type.
+ALLOWED_PARENTS: dict[str, tuple[str, ...]] = {
+    "EK_SPINEBLOCK": ("EK_JUPITER",),
+    "EK_SUPERBLOCK": ("EK_JUPITER",),
+    "EK_AGG_BLOCK": ("EK_SUPERBLOCK",),
+    "EK_CHASSIS": ("EK_RACK",),
+    "EK_CONTROL_POINT": ("EK_CHASSIS", "EK_CONTROL_DOMAIN"),
+    "EK_PACKET_SWITCH": (
+        "EK_SPINEBLOCK",
+        "EK_AGG_BLOCK",
+        "EK_CHASSIS",
+        "EK_CONTROL_POINT",
+        "EK_CONTROL_DOMAIN",
+    ),
+    "EK_PORT": ("EK_PACKET_SWITCH",),
+}
+
 
 class QueryParseError(ValueError):
     """Raised when a request does not match the public MALT query grammar."""
@@ -187,31 +205,15 @@ def compile_query(prompt_or_query: str) -> str:
     lines = ["def process_graph(graph_data):", "    graph_copy = graph_data.copy()"]
 
     if plan.add:
+        allowed_parents = ALLOWED_PARENTS.get(plan.add.node_type, ())
         lines.extend(
             [
                 f"    new_node = {{'name': {plan.add.name!r}, 'type': {plan.add.node_type!r}}}",
                 f"    parent_node_name = {plan.add.parent!r}",
                 "    graph_copy = solid_step_add_node_to_graph(graph_copy, new_node, parent_node_name)",
-                "    parent_types = []",
-                "    for candidate_id, candidate_attrs in graph_data.nodes(data=True):",
-                "        if candidate_attrs.get('name') == parent_node_name:",
-                "            parent_types = candidate_attrs.get('type', [])",
-                "            break",
-                "    if isinstance(parent_types, str):",
-                "        parent_types = [parent_types]",
-                "    allowed_children = {",
-                "        'EK_JUPITER': ('EK_SPINEBLOCK', 'EK_SUPERBLOCK'),",
-                "        'EK_SPINEBLOCK': ('EK_PACKET_SWITCH',),",
-                "        'EK_SUPERBLOCK': ('EK_AGG_BLOCK',),",
-                "        'EK_AGG_BLOCK': ('EK_PACKET_SWITCH',),",
-                "        'EK_CHASSIS': ('EK_CONTROL_POINT', 'EK_PACKET_SWITCH'),",
-                "        'EK_CONTROL_POINT': ('EK_PACKET_SWITCH',),",
-                "        'EK_RACK': ('EK_CHASSIS',),",
-                "        'EK_PACKET_SWITCH': ('EK_PORT',),",
-                "        'EK_CONTROL_DOMAIN': ('EK_CONTROL_POINT', 'EK_PACKET_SWITCH'),",
-                "    }",
-                f"    mutation_safe = any({plan.add.node_type!r} in allowed_children.get(parent_type, ()) for parent_type in parent_types)",
-                "    graph_safe = graph_copy.copy() if mutation_safe else graph_data.copy()",
+                "    parent_types = next((attrs.get('type', []) for _, attrs in graph_data.nodes(data=True) if attrs.get('name') == parent_node_name), [])",
+                f"    mutation_safe = any(parent_type in {allowed_parents!r} for parent_type in ([parent_types] if isinstance(parent_types, str) else parent_types))",
+                "    graph_safe = graph_copy if mutation_safe else graph_data",
             ]
         )
     elif plan.remove:
@@ -229,7 +231,7 @@ def compile_query(prompt_or_query: str) -> str:
             ]
         )
     else:
-        lines.append("    graph_safe = graph_copy.copy()")
+        lines.append("    graph_safe = graph_copy")
 
     lines.extend(
         [

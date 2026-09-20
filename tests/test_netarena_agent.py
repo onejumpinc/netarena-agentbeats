@@ -92,7 +92,8 @@ def test_unsafe_mutation_uses_dry_run_and_safe_commit() -> None:
         "in the updated graph. Return the count number as text."
     )
     assert "mutation_safe = any(" in code
-    assert "graph_safe = graph_copy.copy() if mutation_safe else graph_data.copy()" in code
+    assert "parent_type in ('EK_PACKET_SWITCH',)" in code
+    assert "graph_safe = graph_copy if mutation_safe else graph_data" in code
     assert "solid_step_counting_query(graph_copy" in code
 
 
@@ -100,8 +101,8 @@ def test_safe_mutation_commits_result() -> None:
     code = compile_query(
         "Add new node with name new_EK_PORT_9 type EK_PORT, to ju1.a1.m1.s2c2. Return a graph."
     )
-    assert "allowed_children" in code
-    assert "'EK_PACKET_SWITCH': ('EK_PORT',)" in code
+    assert "parent_type in ('EK_PACKET_SWITCH',)" in code
+    assert "allowed_children" not in code
 
 
 def test_prompt_injection_does_not_become_python() -> None:
