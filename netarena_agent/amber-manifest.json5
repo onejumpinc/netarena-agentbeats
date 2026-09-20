@@ -1,0 +1,31 @@
+{
+  manifest_version: "0.1.0",
+
+  config_schema: {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  },
+
+  program: {
+    // Replaced with a content digest by the publish workflow before submission.
+    image: "ghcr.io/onejumpinc/netarena-malt-agent:codex-legal-agentbeats-100",
+    entrypoint: "python -m netarena_agent.server --host 0.0.0.0 --port 8001",
+    env: { PYTHONUNBUFFERED: "1" },
+    network: {
+      endpoints: [{ name: "a2a_endpoint", port: 8001 }],
+    },
+  },
+
+  slots: {},
+  provides: { a2a: { kind: "a2a", endpoint: "a2a_endpoint" } },
+  exports: { a2a: "a2a" },
+
+  metadata: {
+    name: "One Jump NetArena MALT Agent",
+    description: "Deterministic controlled-language graph compiler with dry-run and safe-commit channels.",
+    benchmark: "NetArena MALT Policy Benchmark",
+    participant_roles: ["malt_operator"],
+  },
+}

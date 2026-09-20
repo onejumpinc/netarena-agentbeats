@@ -1,0 +1,8 @@
+.git
+.github
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+tests
+tools
+AGENTBEATS_BENCHMARK_SELECTION.md

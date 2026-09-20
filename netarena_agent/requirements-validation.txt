@@ -1,0 +1,13 @@
+a2a-sdk[http-server]==0.3.22
+cattrs>=25.3.0
+httpx>=0.28.1
+jsonlines>=4.0.0
+loguru>=0.7.3
+matplotlib>=3.10.0
+networkx>=3.6.0
+numpy>=2.0.0
+openai>=2.0.0
+pandas>=2.2.0
+prototxt-parser>=1.0
+python-dotenv>=1.0.0
+scipy>=1.14.0

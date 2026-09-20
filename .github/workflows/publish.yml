@@ -1,0 +1,98 @@
+name: test-and-publish
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish.yml"
+      - "netarena_agent/Dockerfile"
+      - "netarena_agent/__init__.py"
+      - "netarena_agent/compiler.py"
+      - "netarena_agent/requirements.txt"
+      - "netarena_agent/server.py"
+      - "tests/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: netarena_agent/requirements.txt
+      - name: Install
+        run: python -m pip install -r netarena_agent/requirements.txt pytest
+      - name: Unit tests
+        run: python -m pytest tests/test_netarena_agent.py -q
+      - name: Byte-compile
+        run: python -m compileall -q netarena_agent
+      - name: A2A card smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m netarena_agent.server --host 127.0.0.1 --port 8001 --card-url http://127.0.0.1:8001/ &
+          server_pid=$!
+          trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          url = "http://127.0.0.1:8001/.well-known/agent-card.json"
+          for _ in range(30):
+              try:
+                  with urllib.request.urlopen(url, timeout=1) as response:
+                      card = json.load(response)
+                  assert card["name"] == "onejump-netarena-malt-agent"
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("A2A agent card did not become ready")
+          PY
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish linux/amd64 image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: netarena_agent/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/netarena-malt-agent:latest
+            ghcr.io/${{ github.repository_owner }}/netarena-malt-agent:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+      - name: Record immutable digest
+        run: echo '`${{ steps.build.outputs.digest }}`' >> "$GITHUB_STEP_SUMMARY"
