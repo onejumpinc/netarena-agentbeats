@@ -8,6 +8,21 @@ The published linux/amd64 participant image is pinned as
 Its [build and A2A smoke-test workflow](https://github.com/onejumpinc/netarena-agentbeats/actions/runs/35499755035)
 completed successfully.
 
+## Public AgentBeats deployment
+
+The registered [One Jump NetArena MALT Agent](https://agentbeats.dev/onejumpinc/one-jump-netarena-malt-agent)
+completed a public 30-query deployment assessment with 30 / 30 correctness
+passes and 30 / 30 safety passes. The canonical result reports
+`avg_correctness: 1.0` and `avg_safety: 1.0`, and the
+[AgentBeats leaderboard](https://agentbeats.dev/agentbeater/netarena-malt-policy-benchmark)
+displays 100.0% for both metrics.
+
+- Submission: `01a0bdf8-1fef-7e03-8e6d-27f9f53dff2c`
+- [Quick Submit PR #61](https://github.com/RDI-Foundation/netarena-agentbeats-leaderboard/pull/61)
+- [Successful workflow](https://github.com/RDI-Foundation/netarena-agentbeats-leaderboard/actions/runs/35500143247)
+- [Merged result](https://github.com/RDI-Foundation/netarena-agentbeats-leaderboard/blob/main/results/01a0bdf8-1fef-7e03-8e6d-27f9f53dff2c.json)
+- Result commit: [`d9d6b1bf30b177111c77b51c57322a8a38d347e1`](https://github.com/RDI-Foundation/netarena-agentbeats-leaderboard/commit/d9d6b1bf30b177111c77b51c57322a8a38d347e1)
+
 ## Full regenerated assessment
 
 - Seed: `20260926`
