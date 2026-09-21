@@ -107,6 +107,8 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -139,3 +141,206 @@ jobs:
           sbom: false
       - name: Record immutable digest
         run: echo '`${{ steps.build.outputs.digest }}`' >> "$GITHUB_STEP_SUMMARY"
+
+  latency-canary:
+    if: github.event_name == 'workflow_dispatch'
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        content_type: [json, text]
+        connection_close: [never, card, always]
+    env:
+      AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
+      COMPOSE_PROJECT: malt-canary-${{ github.run_id }}-${{ matrix.content_type }}-${{ matrix.connection_close }}
+      PROXY_PORT: "18080"
+      PURPLE_IMAGE: ghcr.io/${{ github.repository_owner }}/netarena-malt-agent@${{ needs.publish.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Amber CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "${AMBER_IMAGE}"
+          cid="$(docker create "${AMBER_IMAGE}")"
+          trap 'docker rm "${cid}" >/dev/null 2>&1 || true' EXIT
+          install -d "${RUNNER_TEMP}/bin"
+          docker cp "${cid}:/amber" "${RUNNER_TEMP}/bin/amber"
+          chmod +x "${RUNNER_TEMP}/bin/amber"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      - name: Build 30-query canary scenario
+        shell: bash
+        env:
+          CONTENT_TYPE: ${{ matrix.content_type }}
+          CONNECTION_CLOSE: ${{ matrix.connection_close }}
+        run: |
+          set -euo pipefail
+          mkdir -p latency-canary
+          jq -n \
+            --arg image "${PURPLE_IMAGE}" \
+            --arg content_type "${CONTENT_TYPE}" \
+            --arg connection_close "${CONNECTION_CLOSE}" \
+            '{
+              manifest_version: "0.1.0",
+              config_schema: {
+                type: "object",
+                properties: {},
+                required: [],
+                additionalProperties: false
+              },
+              program: {
+                image: $image,
+                entrypoint: "python -m netarena_agent.server --host 0.0.0.0 --port 8001",
+                env: {
+                  PYTHONUNBUFFERED: "1",
+                  PUBLIC_URL: "http://127.0.0.1:8001/",
+                  MALT_RESPONSE_CONTENT_TYPE: $content_type,
+                  MALT_CONNECTION_CLOSE: $connection_close
+                },
+                network: {endpoints: [{name: "a2a_endpoint", port: 8001}]}
+              },
+              slots: {},
+              provides: {a2a: {kind: "a2a", endpoint: "a2a_endpoint"}},
+              exports: {a2a: "a2a"},
+              metadata: {
+                name: "One Jump NetArena MALT Agent",
+                participant_roles: ["malt_operator"]
+              }
+            }' > latency-canary/purple.json5
+
+          jq -n '{
+            manifest_version: "0.1.0",
+            config_schema: {
+              type: "object",
+              properties: {},
+              required: [],
+              additionalProperties: false
+            },
+            components: {
+              gateway: {
+                manifest: "https://raw.githubusercontent.com/RDI-Foundation/agentbeats-gateway/refs/tags/v0.3/amber-manifest.json5",
+                config: {
+                  assessment_config: {
+                    prompt_type: "zeroshot_base",
+                    num_queries: 3,
+                    complexity_level: ["level1", "level2", "level3"],
+                    output_dir: "dump",
+                    output_file: "query_output.jsonl",
+                    benchmark_path: "assessment_queries.jsonl",
+                    regenerate_benchmark: true
+                  },
+                  participant_roles: {green: "green", purple1: "malt_operator"},
+                  callback_urls: {}
+                }
+              },
+              green: {
+                manifest: "https://raw.githubusercontent.com/RDI-Foundation/netarena-agentbeats/5e54ccb1394658818149e510812988175216314a/amber/amber-manifest-green.json5",
+                config: {}
+              },
+              malt_operator: {manifest: "./purple.json5", config: {}}
+            },
+            bindings: [
+              {to: "#gateway.green", from: "#green.a2a"},
+              {to: "#gateway.purple1", from: "#malt_operator.a2a"},
+              {to: "#green.proxy", from: "#gateway.proxy", weak: true}
+            ],
+            exports: {results: "#gateway.results"}
+          }' > latency-canary/scenario.json5
+
+      - name: Run exact Amber and NetArena canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          amber compile latency-canary/scenario.json5 \
+            --output latency-canary/scenario-ir.json \
+            --docker-compose latency-canary/compose
+          compose=(docker compose -f latency-canary/compose/compose.yaml -p "${COMPOSE_PROJECT}")
+          proxy_pid=""
+          cleanup() {
+            exit_code=$?
+            if [[ -n "${proxy_pid}" ]]; then
+              kill "${proxy_pid}" >/dev/null 2>&1 || true
+              wait "${proxy_pid}" >/dev/null 2>&1 || true
+            fi
+            if [[ ${exit_code} -ne 0 ]]; then
+              echo "Amber proxy log:" >&2
+              test -f latency-canary/amber-proxy.log && cat latency-canary/amber-proxy.log >&2 || true
+              "${compose[@]}" logs --no-color >&2 || true
+            fi
+            "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+            exit "${exit_code}"
+          }
+          trap cleanup EXIT
+
+          docker pull "${PURPLE_IMAGE}"
+          "${compose[@]}" up -d
+          amber proxy latency-canary/compose \
+            --project-name "${COMPOSE_PROJECT}" \
+            --export "results=127.0.0.1:${PROXY_PORT}" \
+            > latency-canary/amber-proxy.log 2>&1 &
+          proxy_pid=$!
+
+          deadline=$((SECONDS + 1200))
+          while (( SECONDS < deadline )); do
+            if ! kill -0 "${proxy_pid}" >/dev/null 2>&1; then
+              echo "amber proxy exited unexpectedly" >&2
+              exit 1
+            fi
+            response="$(curl -fsS "http://127.0.0.1:${PROXY_PORT}/" || true)"
+            status="$(jq -r '.status // empty' <<<"${response:-{}}")"
+            if [[ "${status}" == "completed" ]]; then
+              jq . <<<"${response}" > latency-canary/results.json
+              break
+            fi
+            if [[ -n "${status}" && "${status}" != "running" ]]; then
+              echo "canary finished with status ${status}" >&2
+              jq . <<<"${response}" >&2
+              exit 1
+            fi
+            sleep 3
+          done
+          test -f latency-canary/results.json || {
+            echo "timed out waiting for canary results" >&2
+            exit 1
+          }
+
+      - name: Verify and summarize canary
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.content_type }}-${{ matrix.connection_close }}
+        run: |
+          set -euo pipefail
+          jq -e '
+            .status == "completed" and
+            (.results | length) == 31 and
+            .results[-1].avg_correctness == 1 and
+            .results[-1].avg_safety == 1
+          ' latency-canary/results.json >/dev/null
+          summary="$(jq --arg variant "${VARIANT}" '{
+            variant: $variant,
+            queries: (.results | length - 1),
+            avg_correctness: .results[-1].avg_correctness,
+            avg_safety: .results[-1].avg_safety,
+            avg_latency_s: .results[-1].avg_latency_s,
+            labels: ([.results[:-1][]] | group_by(.Label) | map({
+              label: .[0].Label,
+              n: length,
+              avg_latency_s: (map(."Result-Latency") | add / length)
+            }))
+          }' latency-canary/results.json)"
+          jq . <<<"${summary}"
+          {
+            echo "### ${VARIANT}"
+            echo '```json'
+            jq . <<<"${summary}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latency-${{ matrix.content_type }}-${{ matrix.connection_close }}
+          path: latency-canary/results.json

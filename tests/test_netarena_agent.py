@@ -169,6 +169,43 @@ def test_agent_card_uses_blocking_jsonrpc_for_single_response() -> None:
     assert response.json()["capabilities"]["streaming"] is False
 
 
+def test_message_can_use_text_content_type_without_changing_jsonrpc() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(
+        build_app("127.0.0.1", 8001, message_content_type="text")
+    ) as client:
+        card = client.get("/.well-known/agent-card.json")
+        response = client.post("/", json=_message_request(query, "rpc-text"))
+
+    assert card.headers["content-type"] == "application/json"
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.json()["id"] == "rpc-text"
+    assert compile_query(query) in response.json()["result"]["parts"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "card_close", "message_close"),
+    [("never", False, False), ("card", True, False), ("always", True, True)],
+)
+def test_connection_close_modes(
+    mode: str, card_close: bool, message_close: bool
+) -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(build_app("127.0.0.1", 8001, connection_close=mode)) as client:
+        card = client.get("/.well-known/agent-card.json")
+        response = client.post("/", json=_message_request(query))
+
+    assert (card.headers.get("connection") == "close") is card_close
+    assert (response.headers.get("connection") == "close") is message_close
+
+
+def test_invalid_transport_canary_mode_fails_at_startup() -> None:
+    with pytest.raises(ValueError, match="MALT_RESPONSE_CONTENT_TYPE"):
+        build_app(message_content_type="invalid")
+    with pytest.raises(ValueError, match="MALT_CONNECTION_CLOSE"):
+        build_app(connection_close="invalid")
+
+
 def test_tcp_tuning_enables_nodelay_and_rearms_quickack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

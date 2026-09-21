@@ -19,6 +19,12 @@ UNSUPPORTED_RESPONSE = "Unsupported NetArena MALT request."
 _AGENT_CARD_PATH = "/.well-known/agent-card.json"
 _MAX_REQUEST_BYTES = 1_048_576
 _JSON_CONTENT_TYPE = (b"content-type", b"application/json")
+_TEXT_CONTENT_TYPE = (b"content-type", b"text/plain; charset=utf-8")
+_CONTENT_TYPES = {
+    "json": _JSON_CONTENT_TYPE,
+    "text": _TEXT_CONTENT_TYPE,
+}
+_CONNECTION_CLOSE_MODES = {"never", "card", "always"}
 _TCP_QUICKACK = (
     getattr(socket, "TCP_QUICKACK", None) if sys.platform.startswith("linux") else None
 )
@@ -96,7 +102,7 @@ def _agent_card(host: str, port: int, card_url: str | None) -> dict[str, Any]:
             }
         ],
         "url": _card_url(host, port, card_url),
-        "version": "1.3.1",
+        "version": "1.3.2",
     }
 
 
@@ -109,8 +115,25 @@ class FastA2AApplication:
     fast path preserves the A2A wire schema while avoiding that machinery.
     """
 
-    def __init__(self, card: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        card: Mapping[str, Any],
+        *,
+        message_content_type: str = "json",
+        connection_close: str = "never",
+    ) -> None:
         self._card = orjson.dumps(card)
+        try:
+            self._message_content_type = _CONTENT_TYPES[message_content_type]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported MALT_RESPONSE_CONTENT_TYPE: {message_content_type!r}"
+            ) from exc
+        if connection_close not in _CONNECTION_CLOSE_MODES:
+            raise ValueError(
+                f"unsupported MALT_CONNECTION_CLOSE: {connection_close!r}"
+            )
+        self._connection_close = connection_close
 
     async def __call__(self, scope: dict, receive, send) -> None:
         scope_type = scope["type"]
@@ -129,7 +152,12 @@ class FastA2AApplication:
         method = scope["method"]
         path = scope["path"]
         if method == "GET" and path == _AGENT_CARD_PATH:
-            await self._send(send, 200, self._card)
+            await self._send(
+                send,
+                200,
+                self._card,
+                close=self._connection_close in {"card", "always"},
+            )
             return
         if method != "POST" or path != "/":
             await self._send(send, 404, b'{"detail":"Not Found"}')
@@ -201,7 +229,13 @@ class FastA2AApplication:
                     },
                 }
             )
-            await self._send(send, 200, payload)
+            await self._send(
+                send,
+                200,
+                payload,
+                content_type=self._message_content_type,
+                close=self._connection_close == "always",
+            )
         except (KeyError, TypeError, ValueError, orjson.JSONDecodeError):
             payload = orjson.dumps(
                 {
@@ -210,27 +244,60 @@ class FastA2AApplication:
                     "error": {"code": -32600, "message": "Invalid Request"},
                 }
             )
-            await self._send(send, 200, payload)
+            await self._send(
+                send,
+                200,
+                payload,
+                content_type=self._message_content_type,
+                close=self._connection_close == "always",
+            )
 
     @staticmethod
-    async def _send(send, status: int, body: bytes) -> None:
+    async def _send(
+        send,
+        status: int,
+        body: bytes,
+        *,
+        content_type: tuple[bytes, bytes] = _JSON_CONTENT_TYPE,
+        close: bool = False,
+    ) -> None:
+        headers = [
+            content_type,
+            (b"content-length", str(len(body)).encode("ascii")),
+        ]
+        if close:
+            headers.append((b"connection", b"close"))
         await send(
             {
                 "type": "http.response.start",
                 "status": status,
-                "headers": [
-                    _JSON_CONTENT_TYPE,
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
+                "headers": headers,
             }
         )
         await send({"type": "http.response.body", "body": body})
 
 
 def build_app(
-    host: str = "0.0.0.0", port: int = 8001, card_url: str | None = None
+    host: str = "0.0.0.0",
+    port: int = 8001,
+    card_url: str | None = None,
+    *,
+    message_content_type: str | None = None,
+    connection_close: str | None = None,
 ) -> FastA2AApplication:
-    return FastA2AApplication(_agent_card(host, port, card_url))
+    return FastA2AApplication(
+        _agent_card(host, port, card_url),
+        message_content_type=(
+            message_content_type
+            if message_content_type is not None
+            else os.environ.get("MALT_RESPONSE_CONTENT_TYPE", "json").strip().lower()
+        ),
+        connection_close=(
+            connection_close
+            if connection_close is not None
+            else os.environ.get("MALT_CONNECTION_CLOSE", "never").strip().lower()
+        ),
+    )
 
 
 def main() -> int:
