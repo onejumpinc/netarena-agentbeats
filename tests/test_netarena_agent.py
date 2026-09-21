@@ -223,8 +223,14 @@ def test_held_stream_waits_for_client_disconnect_after_first_message() -> None:
     asyncio.run(exercise())
     assert outgoing[0]["type"] == "http.response.start"
     assert (b"content-type", b"text/event-stream") in outgoing[0]["headers"]
+    declared_length = next(
+        int(value)
+        for name, value in outgoing[0]["headers"]
+        if name == b"content-length"
+    )
     assert outgoing[1]["more_body"] is True
     assert outgoing[1]["body"].startswith(b"data: ")
+    assert declared_length == len(outgoing[1]["body"]) + 1
 
 
 def test_message_can_use_text_content_type_without_changing_jsonrpc() -> None:

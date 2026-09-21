@@ -285,15 +285,22 @@ class FastA2AApplication:
         evaluator's long graph-processing pauses.
         """
 
+        body = b"data: " + payload + b"\n\n"
+        # A known length avoids Hyper/Uvicorn's multi-write chunk framing. In
+        # hold mode, advertise one trailing byte that is intentionally never
+        # sent: the A2A client returns after the complete Message event, then
+        # closes the still-incomplete HTTP response and retires the connection.
+        content_length = len(body) + int(hold_open)
         headers = [
             _SSE_CONTENT_TYPE,
             (b"cache-control", b"no-cache"),
+            (b"content-length", str(content_length).encode("ascii")),
         ]
         await send({"type": "http.response.start", "status": 200, "headers": headers})
         await send(
             {
                 "type": "http.response.body",
-                "body": b"data: " + payload + b"\n\n",
+                "body": body,
                 "more_body": hold_open,
             }
         )
