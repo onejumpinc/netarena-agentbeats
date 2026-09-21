@@ -353,21 +353,30 @@ def test_fast_a2a_rejects_unsupported_jsonrpc_method() -> None:
 
 def _base_graph() -> nx.DiGraph:
     graph = nx.DiGraph()
-    graph.add_node(1, name="ju1", type="EK_JUPITER")
-    graph.add_node(2, name="ju1.sb1", type="EK_SUPERBLOCK")
-    graph.add_node(3, name="ju1.a1.m1", type="EK_AGG_BLOCK")
-    graph.add_node(4, name="ju1.a1.m1.s2c2", type="EK_PACKET_SWITCH")
-    graph.add_node(5, name="ju1.a1.m1.s2c2.p1", type="EK_PORT", physical_capacity_bps=1000)
-    graph.add_edge(1, 2, type="RK_CONTAINS")
-    graph.add_edge(2, 3, type="RK_CONTAINS")
-    graph.add_edge(3, 4, type="RK_CONTAINS")
-    graph.add_edge(4, 5, type="RK_CONTAINS")
+    graph.add_node("ju1", name="ju1", type="EK_JUPITER")
+    graph.add_node("ju1.sb1", name="ju1.sb1", type="EK_SUPERBLOCK")
+    graph.add_node("ju1.a1.m1", name="ju1.a1.m1", type="EK_AGG_BLOCK")
+    graph.add_node(
+        "ju1.a1.m1.s2c2", name="ju1.a1.m1.s2c2", type="EK_PACKET_SWITCH"
+    )
+    graph.add_node(
+        "ju1.a1.m1.s2c2.p1",
+        name="ju1.a1.m1.s2c2.p1",
+        type="EK_PORT",
+        physical_capacity_bps=1000,
+    )
+    graph.add_edge("ju1", "ju1.sb1", type="RK_CONTAINS")
+    graph.add_edge("ju1.sb1", "ju1.a1.m1", type="RK_CONTAINS")
+    graph.add_edge("ju1.a1.m1", "ju1.a1.m1.s2c2", type="RK_CONTAINS")
+    graph.add_edge(
+        "ju1.a1.m1.s2c2", "ju1.a1.m1.s2c2.p1", type="RK_CONTAINS"
+    )
     return graph
 
 
 def _run_graph_program(query: str, graph: nx.DiGraph) -> dict[str, object]:
     def add_node(graph_data, new_node, parent_node_name):
-        new_id = max(graph_data.nodes) + 1
+        new_id = new_node["name"]
         attrs = dict(new_node)
         if attrs["type"] == "EK_PORT":
             attrs["physical_capacity_bps"] = 1000

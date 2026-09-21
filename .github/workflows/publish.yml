@@ -152,11 +152,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [baseline, binary, hints, hints-binary, coalesce, hints-coalesce-binary]
+        variant: [baseline]
+        workload: [mixed, add, remove]
         trial: [1, 2, 3]
     env:
       AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
-      COMPOSE_PROJECT: malt-canary-${{ github.run_id }}-${{ matrix.variant }}-${{ matrix.trial }}
+      COMPOSE_PROJECT: malt-canary-${{ github.run_id }}-${{ matrix.variant }}-${{ matrix.workload }}-${{ matrix.trial }}
       PROXY_PORT: "18080"
       PURPLE_IMAGE: ghcr.io/${{ github.repository_owner }}/netarena-malt-agent@${{ needs.publish.outputs.image_digest }}
     steps:
@@ -178,6 +179,7 @@ jobs:
         shell: bash
         env:
           VARIANT: ${{ matrix.variant }}
+          WORKLOAD: ${{ matrix.workload }}
         run: |
           set -euo pipefail
           mkdir -p latency-canary
@@ -239,6 +241,30 @@ jobs:
               exit 1
               ;;
           esac
+          case "${WORKLOAD}" in
+            mixed)
+              num_queries=3
+              complexity_level='["level1", "level2", "level3"]'
+              start_index=0
+              end_index=30
+              ;;
+            add)
+              num_queries=30
+              complexity_level='["level1"]'
+              start_index=0
+              end_index=30
+              ;;
+            remove)
+              num_queries=30
+              complexity_level='["level1"]'
+              start_index=60
+              end_index=90
+              ;;
+            *)
+              echo "unknown canary workload: ${WORKLOAD}" >&2
+              exit 1
+              ;;
+          esac
           jq -n \
             --arg image "${PURPLE_IMAGE}" \
             --arg content_type "${content_type}" \
@@ -277,7 +303,12 @@ jobs:
               }
             }' > latency-canary/purple.json5
 
-          jq -n '{
+          jq -n \
+            --argjson num_queries "${num_queries}" \
+            --argjson complexity_level "${complexity_level}" \
+            --argjson start_index "${start_index}" \
+            --argjson end_index "${end_index}" \
+            '{
             manifest_version: "0.1.0",
             config_schema: {
               type: "object",
@@ -291,8 +322,10 @@ jobs:
                 config: {
                   assessment_config: {
                     prompt_type: "zeroshot_base",
-                    num_queries: 3,
-                    complexity_level: ["level1", "level2", "level3"],
+                    num_queries: $num_queries,
+                    complexity_level: $complexity_level,
+                    start_index: $start_index,
+                    end_index: $end_index,
                     output_dir: "dump",
                     output_file: "query_output.jsonl",
                     benchmark_path: "assessment_queries.jsonl",
@@ -380,7 +413,7 @@ jobs:
       - name: Verify and summarize canary
         shell: bash
         env:
-          VARIANT: ${{ matrix.variant }}-${{ matrix.trial }}
+          VARIANT: ${{ matrix.variant }}-${{ matrix.workload }}-${{ matrix.trial }}
         run: |
           set -euo pipefail
           jq -e '
@@ -411,5 +444,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: latency-${{ matrix.variant }}-${{ matrix.trial }}
+          name: latency-${{ matrix.variant }}-${{ matrix.workload }}-${{ matrix.trial }}
           path: latency-canary/results.json

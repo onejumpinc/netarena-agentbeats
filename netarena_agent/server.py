@@ -172,7 +172,7 @@ def _agent_card(
             }
         ],
         "url": _card_url(host, port, card_url),
-        "version": "1.3.5",
+        "version": "1.3.6",
     }
 
 

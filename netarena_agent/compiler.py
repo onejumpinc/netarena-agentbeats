@@ -213,7 +213,7 @@ def compile_query(prompt_or_query: str) -> str:
             [
                 f"    new_node = {{'name': {plan.add.name!r}, 'type': {plan.add.node_type!r}}}",
                 f"    parent_node_name = {plan.add.parent!r}",
-                "    parent_types = graph_data.nodes[parent_node_name].get('type', []) if parent_node_name in graph_data else next((attrs.get('type', []) for _, attrs in graph_data.nodes(data=True) if attrs.get('name') == parent_node_name), [])",
+                "    parent_types = graph_data.nodes.get(parent_node_name, {}).get('type', [])",
                 f"    mutation_safe = any(parent_type in {allowed_parents!r} for parent_type in ([parent_types] if isinstance(parent_types, str) else parent_types))",
                 "    graph_copy = graph_data if mutation_safe else graph_data.copy()",
                 "    graph_copy = solid_step_add_node_to_graph(graph_copy, new_node, parent_node_name)",
@@ -224,9 +224,8 @@ def compile_query(prompt_or_query: str) -> str:
         lines.extend(
             [
                 f"    child_node_name = {plan.remove!r}",
-                "    child_node_id = child_node_name if child_node_name in graph_data else next((candidate_id for candidate_id, attrs in graph_data.nodes(data=True) if attrs.get('name') == child_node_name), None)",
-                "    removed_descendants = nx.descendants(graph_data, child_node_id) if child_node_id is not None else set()",
-                "    graph_copy = solid_step_remove_node_from_graph(graph_copy, child_node_name)",
+                "    removed_descendants = nx.descendants(graph_data, child_node_name) if child_node_name in graph_data else set()",
+                "    graph_copy = solid_step_remove_node_from_graph(graph_data, child_node_name)",
                 "    graph_safe = graph_copy if not removed_descendants else graph_copy.copy()",
                 "    if removed_descendants:",
                 "        graph_safe.remove_nodes_from(removed_descendants)",
