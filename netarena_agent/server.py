@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
+import sys
 from collections.abc import Mapping
 from typing import Any
 
 import orjson
 import uvicorn
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from .compiler import QueryParseError, compile_response
 
@@ -16,6 +19,47 @@ UNSUPPORTED_RESPONSE = "Unsupported NetArena MALT request."
 _AGENT_CARD_PATH = "/.well-known/agent-card.json"
 _MAX_REQUEST_BYTES = 1_048_576
 _JSON_CONTENT_TYPE = (b"content-type", b"application/json")
+_TCP_QUICKACK = (
+    getattr(socket, "TCP_QUICKACK", None) if sys.platform.startswith("linux") else None
+)
+
+
+def _tune_tcp_socket(transport, *, quick_ack: bool) -> None:
+    """Apply latency-oriented TCP options without making startup fragile.
+
+    Amber's local Hyper connector deliberately defaults to Nagle's algorithm.
+    A prompt may consequently wait for Linux's delayed-ACK timer when Hyper
+    writes its HTTP headers and JSON body separately. ``TCP_QUICKACK`` is a
+    one-shot hint, so it is re-armed for each inbound chunk below. Explicitly
+    setting ``TCP_NODELAY`` also keeps our response headers and body from
+    encountering the same interaction in the opposite direction.
+    """
+
+    sock = transport.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if quick_ack and _TCP_QUICKACK is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, _TCP_QUICKACK, 1)
+    except OSError:
+        # Unix sockets, test transports, and unusual kernels may not expose
+        # these TCP options. The HTTP service remains valid without them.
+        return
+
+
+class LowLatencyHttpToolsProtocol(HttpToolsProtocol):
+    """Uvicorn's HTTP/1.1 protocol with delayed-ACK avoidance for Amber."""
+
+    def connection_made(self, transport) -> None:
+        _tune_tcp_socket(transport, quick_ack=True)
+        super().connection_made(transport)
+
+    def data_received(self, data: bytes) -> None:
+        # Linux may switch QUICKACK off after using it once, so request the
+        # immediate ACK again before parsing every newly delivered chunk.
+        _tune_tcp_socket(self.transport, quick_ack=True)
+        super().data_received(data)
 
 
 def _card_url(host: str, port: int, explicit: str | None) -> str:
@@ -52,7 +96,7 @@ def _agent_card(host: str, port: int, card_url: str | None) -> dict[str, Any]:
             }
         ],
         "url": _card_url(host, port, card_url),
-        "version": "1.3.0",
+        "version": "1.3.1",
     }
 
 
@@ -201,7 +245,7 @@ def main() -> int:
         port=args.port,
         access_log=False,
         loop="uvloop",
-        http="httptools",
+        http=LowLatencyHttpToolsProtocol,
     )
     return 0
 

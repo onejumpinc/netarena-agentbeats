@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import ast
+import socket
 
 import networkx as nx
 import pytest
 from starlette.testclient import TestClient
 
+import netarena_agent.server as agent_server
 from netarena_agent.compiler import QueryParseError, compile_query, extract_query, parse_query
 from netarena_agent.server import UNSUPPORTED_RESPONSE, _card_url, build_app
 
@@ -165,6 +167,28 @@ def test_agent_card_uses_blocking_jsonrpc_for_single_response() -> None:
 
     assert response.status_code == 200
     assert response.json()["capabilities"]["streaming"] is False
+
+
+def test_tcp_tuning_enables_nodelay_and_rearms_quickack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, int]] = []
+
+    class FakeSocket:
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            calls.append((level, option, value))
+
+    class FakeTransport:
+        def get_extra_info(self, name: str):
+            assert name == "socket"
+            return FakeSocket()
+
+    quickack = 12
+    monkeypatch.setattr(agent_server, "_TCP_QUICKACK", quickack)
+    agent_server._tune_tcp_socket(FakeTransport(), quick_ack=True)
+
+    assert (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) in calls
+    assert (socket.IPPROTO_TCP, quickack, 1) in calls
 
 
 def test_fast_a2a_message_send_returns_a_protocol_message() -> None:
