@@ -4,8 +4,8 @@ Validated on 2026-09-20 against the unmodified evaluator at NetArena commit
 [`525ca6a80fce5a8faef508b70137fbd0513a85cb`](https://github.com/Froot-NetSys/NetArena/commit/525ca6a80fce5a8faef508b70137fbd0513a85cb).
 
 The published linux/amd64 participant image is pinned as
-`ghcr.io/onejumpinc/netarena-malt-agent@sha256:3e25cf0da8a2494eb2b5d26c50667ee7d23d6cfec6b2dd48302011f4bdd98455`.
-Its [build and A2A smoke-test workflow](https://github.com/onejumpinc/netarena-agentbeats/actions/runs/35499755035)
+`ghcr.io/onejumpinc/netarena-malt-agent@sha256:49195ea7f58b8d94df79e0320de42a265b9710394214c57e010833beb984781a`.
+Its [build and A2A smoke-test workflow](https://github.com/onejumpinc/netarena-agentbeats/actions/runs/35551695797)
 completed successfully.
 
 ## Public AgentBeats deployment
@@ -51,15 +51,16 @@ uv run --isolated --no-project \
 
 The participant was also run through a live A2A server and the official
 NetArena client/evaluator with all four supported envelopes (`zeroshot_base`,
-`fewshot_base`, `zeroshot_cot`, and `fewshot_cot`). Seed `20260925` covered all
+`fewshot_base`, `zeroshot_cot`, and `fewshot_cot`). Seed `20260920` covered all
 10 templates under every envelope: 40 / 40 correct and 40 / 40 safe, with no
 failures.
 
 ## Targeted regression suite
 
-The 20 focused tests cover all live grammar shapes, prompt extraction,
+The 24 focused tests cover all live grammar shapes, prompt extraction,
 runtime graph safety, descendant cleanup, nonexistent parents, wildcard Agent
-Card handling, and inert parse failures. Result: 20 passed.
+Card handling, inert parse failures, blocking A2A responses, and low-latency
+TCP socket tuning. Result: 24 passed.
 
 ## Interpretation
 
