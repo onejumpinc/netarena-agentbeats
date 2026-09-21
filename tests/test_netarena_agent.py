@@ -180,7 +180,7 @@ def test_agent_card_uses_blocking_jsonrpc_for_single_response() -> None:
     assert response.json()["capabilities"]["streaming"] is False
 
 
-@pytest.mark.parametrize("mode", ["close", "hold"])
+@pytest.mark.parametrize("mode", ["close", "hold", "task"])
 def test_stream_mode_is_advertised(mode: str) -> None:
     with TestClient(build_app("127.0.0.1", 8001, stream_mode=mode)) as client:
         response = client.get("/.well-known/agent-card.json")
@@ -199,6 +199,19 @@ def test_closed_stream_returns_one_a2a_sse_message() -> None:
     payload = json.loads(response.text.removeprefix("data: ").strip())
     assert payload["id"] == "rpc-stream"
     assert compile_query(query) in payload["result"]["parts"][0]["text"]
+
+
+def test_task_stream_returns_completed_task_with_text_artifact() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    request = _message_request(query, "rpc-task", "message/stream")
+    with TestClient(build_app("127.0.0.1", 8001, stream_mode="task")) as client:
+        response = client.post("/", json=request)
+
+    payload = json.loads(response.text.removeprefix("data: ").strip())
+    task = payload["result"]
+    assert task["kind"] == "task"
+    assert task["status"]["state"] == "completed"
+    assert compile_query(query) in task["artifacts"][0]["parts"][0]["text"]
 
 
 def test_held_stream_waits_for_client_disconnect_after_first_message() -> None:
@@ -264,6 +277,16 @@ def test_message_can_use_binary_content_type_without_changing_jsonrpc() -> None:
     assert compile_query(query) in response.json()["result"]["parts"][0]["text"]
 
 
+def test_response_padding_preserves_jsonrpc_payload() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(build_app("127.0.0.1", 8001, response_pad_bytes=2048)) as client:
+        response = client.post("/", json=_message_request(query, "rpc-padded"))
+
+    assert len(response.content) == 2048
+    assert response.json()["id"] == "rpc-padded"
+    assert compile_query(query) in response.json()["result"]["parts"][0]["text"]
+
+
 def test_coalescing_transport_combines_headers_and_body() -> None:
     writes: list[bytes] = []
 
@@ -304,6 +327,8 @@ def test_invalid_transport_canary_mode_fails_at_startup() -> None:
         build_app(connection_close="invalid")
     with pytest.raises(ValueError, match="MALT_STREAM_MODE"):
         build_app(stream_mode="invalid")
+    with pytest.raises(ValueError, match="MALT_RESPONSE_PAD_BYTES"):
+        build_app(response_pad_bytes=-1)
 
 
 def test_tcp_tuning_enables_nodelay_and_rearms_quickack(

@@ -30,7 +30,7 @@ _CONTENT_TYPES = {
     "text": _TEXT_CONTENT_TYPE,
 }
 _CONNECTION_CLOSE_MODES = {"never", "card", "always"}
-_STREAM_MODES = {"off", "close", "hold"}
+_STREAM_MODES = {"off", "close", "hold", "task"}
 _TCP_QUICKACK = (
     getattr(socket, "TCP_QUICKACK", None) if sys.platform.startswith("linux") else None
 )
@@ -192,6 +192,7 @@ class FastA2AApplication:
         message_content_type: str = "json",
         connection_close: str = "never",
         stream_mode: str = "off",
+        response_pad_bytes: int = 0,
     ) -> None:
         self._card = orjson.dumps(card)
         try:
@@ -208,6 +209,14 @@ class FastA2AApplication:
         if stream_mode not in _STREAM_MODES:
             raise ValueError(f"unsupported MALT_STREAM_MODE: {stream_mode!r}")
         self._stream_mode = stream_mode
+        if response_pad_bytes < 0:
+            raise ValueError("MALT_RESPONSE_PAD_BYTES must be non-negative")
+        self._response_pad_bytes = response_pad_bytes
+
+    def _pad_payload(self, payload: bytes) -> bytes:
+        if len(payload) >= self._response_pad_bytes:
+            return payload
+        return payload + b" " * (self._response_pad_bytes - len(payload))
 
     async def __call__(self, scope: dict, receive, send) -> None:
         scope_type = scope["type"]
@@ -294,17 +303,28 @@ class FastA2AApplication:
 
             # The incoming JSON-RPC id is already unique for every official
             # client call, so it can safely identify this one response Message.
-            payload = orjson.dumps(
-                {
-                    "id": rpc_id,
-                    "jsonrpc": "2.0",
-                    "result": {
-                        "kind": "message",
-                        "messageId": str(rpc_id),
-                        "parts": [{"kind": "text", "text": answer}],
-                        "role": "agent",
-                    },
+            if self._stream_mode == "task":
+                result = {
+                    "artifacts": [
+                        {
+                            "artifactId": "a",
+                            "parts": [{"kind": "text", "text": answer}],
+                        }
+                    ],
+                    "contextId": "c",
+                    "id": str(rpc_id),
+                    "kind": "task",
+                    "status": {"state": "completed"},
                 }
+            else:
+                result = {
+                    "kind": "message",
+                    "messageId": str(rpc_id),
+                    "parts": [{"kind": "text", "text": answer}],
+                    "role": "agent",
+                }
+            payload = self._pad_payload(
+                orjson.dumps({"id": rpc_id, "jsonrpc": "2.0", "result": result})
             )
             if self._stream_mode == "off":
                 await self._send(
@@ -322,12 +342,14 @@ class FastA2AApplication:
                     hold_open=self._stream_mode == "hold",
                 )
         except (KeyError, TypeError, ValueError, orjson.JSONDecodeError):
-            payload = orjson.dumps(
-                {
-                    "id": rpc_id,
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32600, "message": "Invalid Request"},
-                }
+            payload = self._pad_payload(
+                orjson.dumps(
+                    {
+                        "id": rpc_id,
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    }
+                )
             )
             await self._send(
                 send,
@@ -406,6 +428,7 @@ def build_app(
     message_content_type: str | None = None,
     connection_close: str | None = None,
     stream_mode: str | None = None,
+    response_pad_bytes: int | None = None,
 ) -> FastA2AApplication:
     resolved_stream_mode = (
         stream_mode
@@ -430,6 +453,11 @@ def build_app(
             else os.environ.get("MALT_CONNECTION_CLOSE", "never").strip().lower()
         ),
         stream_mode=resolved_stream_mode,
+        response_pad_bytes=(
+            response_pad_bytes
+            if response_pad_bytes is not None
+            else int(os.environ.get("MALT_RESPONSE_PAD_BYTES", "0").strip())
+        ),
     )
 
 
@@ -439,17 +467,26 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--card-url")
     args = parser.parse_args()
-    protocol = (
-        CoalescingLowLatencyHttpToolsProtocol
-        if _env_enabled("MALT_COALESCE_WRITES")
-        else LowLatencyHttpToolsProtocol
-    )
+    http_mode = os.environ.get("MALT_HTTP_PROTOCOL", "httptools").strip().lower()
+    if http_mode == "h11":
+        protocol = "h11"
+    elif http_mode == "httptools":
+        protocol = (
+            CoalescingLowLatencyHttpToolsProtocol
+            if _env_enabled("MALT_COALESCE_WRITES")
+            else LowLatencyHttpToolsProtocol
+        )
+    else:
+        raise ValueError(f"unsupported MALT_HTTP_PROTOCOL: {http_mode!r}")
+    event_loop = os.environ.get("MALT_EVENT_LOOP", "uvloop").strip().lower()
+    if event_loop not in {"asyncio", "uvloop"}:
+        raise ValueError(f"unsupported MALT_EVENT_LOOP: {event_loop!r}")
     uvicorn.run(
         build_app(args.host, args.port, args.card_url),
         host=args.host,
         port=args.port,
         access_log=False,
-        loop="uvloop",
+        loop=event_loop,
         http=protocol,
         date_header=False,
         server_header=False,

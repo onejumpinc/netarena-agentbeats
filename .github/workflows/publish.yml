@@ -152,9 +152,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [baseline]
-        workload: [mixed, add, remove]
-        trial: [1, 2, 3]
+        variant: [pad-1024, pad-1536, pad-2048, pad-4096, stream-task, stream-task-pad-2048, stream-task-h11, blocking-h11]
+        workload: [mixed]
+        trial: [1]
     env:
       AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
       COMPOSE_PROJECT: malt-canary-${{ github.run_id }}-${{ matrix.variant }}-${{ matrix.workload }}-${{ matrix.trial }}
@@ -188,6 +188,9 @@ jobs:
               content_type=text
               connection_close=always
               stream_mode=off
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
               early_hints=0
               coalesce_writes=0
               ;;
@@ -195,6 +198,9 @@ jobs:
               content_type=binary
               connection_close=always
               stream_mode=off
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
               early_hints=0
               coalesce_writes=0
               ;;
@@ -202,6 +208,9 @@ jobs:
               content_type=text
               connection_close=always
               stream_mode=off
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
               early_hints=1
               coalesce_writes=0
               ;;
@@ -209,6 +218,9 @@ jobs:
               content_type=binary
               connection_close=always
               stream_mode=off
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
               early_hints=1
               coalesce_writes=0
               ;;
@@ -216,6 +228,9 @@ jobs:
               content_type=text
               connection_close=always
               stream_mode=off
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
               early_hints=0
               coalesce_writes=1
               ;;
@@ -223,6 +238,9 @@ jobs:
               content_type=binary
               connection_close=always
               stream_mode=off
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
               early_hints=1
               coalesce_writes=1
               ;;
@@ -230,11 +248,91 @@ jobs:
               content_type=text
               connection_close=never
               stream_mode=close
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
+              early_hints=0
+              coalesce_writes=0
               ;;
             stream-hold)
               content_type=text
               connection_close=never
               stream_mode=hold
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            pad-1024|pad-1536|pad-2048|pad-4096)
+              content_type=text
+              connection_close=always
+              stream_mode=off
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes="${VARIANT#pad-}"
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            stream-task)
+              content_type=text
+              connection_close=never
+              stream_mode=task
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=0
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            stream-task-h11)
+              content_type=text
+              connection_close=never
+              stream_mode=task
+              http_protocol=h11
+              event_loop=asyncio
+              response_pad_bytes=0
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            stream-task-h11-uvloop)
+              content_type=text
+              connection_close=never
+              stream_mode=task
+              http_protocol=h11
+              event_loop=uvloop
+              response_pad_bytes=0
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            blocking-h11)
+              content_type=text
+              connection_close=always
+              stream_mode=off
+              http_protocol=h11
+              event_loop=asyncio
+              response_pad_bytes=0
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            blocking-h11-uvloop)
+              content_type=text
+              connection_close=always
+              stream_mode=off
+              http_protocol=h11
+              event_loop=uvloop
+              response_pad_bytes=0
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            stream-task-pad-2048)
+              content_type=text
+              connection_close=never
+              stream_mode=task
+              http_protocol=httptools
+              event_loop=uvloop
+              response_pad_bytes=2048
+              early_hints=0
+              coalesce_writes=0
               ;;
             *)
               echo "unknown canary variant: ${VARIANT}" >&2
@@ -270,6 +368,9 @@ jobs:
             --arg content_type "${content_type}" \
             --arg connection_close "${connection_close}" \
             --arg stream_mode "${stream_mode}" \
+            --arg http_protocol "${http_protocol}" \
+            --arg event_loop "${event_loop}" \
+            --arg response_pad_bytes "${response_pad_bytes}" \
             --arg early_hints "${early_hints}" \
             --arg coalesce_writes "${coalesce_writes}" \
             '{
@@ -289,6 +390,9 @@ jobs:
                   MALT_RESPONSE_CONTENT_TYPE: $content_type,
                   MALT_CONNECTION_CLOSE: $connection_close,
                   MALT_STREAM_MODE: $stream_mode,
+                  MALT_HTTP_PROTOCOL: $http_protocol,
+                  MALT_EVENT_LOOP: $event_loop,
+                  MALT_RESPONSE_PAD_BYTES: $response_pad_bytes,
                   MALT_EARLY_HINTS: $early_hints,
                   MALT_COALESCE_WRITES: $coalesce_writes
                 },
