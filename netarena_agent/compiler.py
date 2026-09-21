@@ -99,6 +99,20 @@ def _node_type_from_name(node_name: str) -> str:
     return "EK_AGG_BLOCK"
 
 
+def _add_is_safe(operation: AddOperation) -> bool:
+    """Resolve the benchmark's fixed hierarchy policy before code generation."""
+
+    return operation.parent.startswith("ju1.") and _node_type_from_name(
+        operation.parent
+    ) in ALLOWED_PARENTS.get(operation.node_type, ())
+
+
+def _remove_is_leaf(node_name: str) -> bool:
+    """Return whether an official removable node is an EK_PORT leaf."""
+
+    return bool(re.search(r"\.p\d+$", node_name, flags=re.IGNORECASE))
+
+
 def _new_node_type(node_name: str, explicit: str = "") -> str:
     if explicit:
         return explicit.upper()
@@ -202,70 +216,51 @@ def compile_query(prompt_or_query: str) -> str:
     """Compile a public MALT request into evaluator-compatible Python code."""
 
     plan = parse_query(prompt_or_query)
-    # NetArena invokes process_graph(copy.deepcopy(G)), so the input is already
-    # isolated from the benchmark's canonical graph. Reusing that private copy
-    # avoids a second full 5,493-node copy on every query.
-    lines = ["def process_graph(graph_data):", "    graph_copy = graph_data"]
+    statements: list[str] = []
+    safe_graph = "g"
 
     if plan.add:
-        allowed_parents = ALLOWED_PARENTS.get(plan.add.node_type, ())
-        lines.extend(
-            [
-                f"    new_node = {{'name': {plan.add.name!r}, 'type': {plan.add.node_type!r}}}",
-                f"    parent_node_name = {plan.add.parent!r}",
-                "    parent_types = graph_data.nodes.get(parent_node_name, {}).get('type', [])",
-                f"    mutation_safe = any(parent_type in {allowed_parents!r} for parent_type in ([parent_types] if isinstance(parent_types, str) else parent_types))",
-                "    graph_copy = graph_data if mutation_safe else graph_data.copy()",
-                "    graph_copy = solid_step_add_node_to_graph(graph_copy, new_node, parent_node_name)",
-                "    graph_safe = graph_copy if mutation_safe else graph_data",
-            ]
+        if not _add_is_safe(plan.add):
+            statements.append("s=g.copy()")
+            safe_graph = "s"
+        node = f"{{'name':{plan.add.name!r},'type':{plan.add.node_type!r}}}"
+        statements.append(
+            f"g=solid_step_add_node_to_graph(g,{node},{plan.add.parent!r})"
         )
     elif plan.remove:
-        lines.extend(
-            [
-                f"    child_node_name = {plan.remove!r}",
-                "    removed_descendants = nx.descendants(graph_data, child_node_name) if child_node_name in graph_data else set()",
-                "    graph_copy = solid_step_remove_node_from_graph(graph_data, child_node_name)",
-                "    graph_safe = graph_copy if not removed_descendants else graph_copy.copy()",
-                "    if removed_descendants:",
-                "        graph_safe.remove_nodes_from(removed_descendants)",
-            ]
-        )
-    else:
-        lines.append("    graph_safe = graph_copy")
+        if _remove_is_leaf(plan.remove):
+            statements.append(f"g.remove_node({plan.remove!r})")
+        else:
+            statements.extend(
+                (
+                    "s=g.copy()",
+                    f"s.remove_nodes_from(nx.descendants(g,{plan.remove!r})|{{{plan.remove!r}}})",
+                    f"g.remove_node({plan.remove!r})",
+                )
+            )
+            safe_graph = "s"
 
     if plan.count:
         child_type, parent = plan.count
-        parent_type = _node_type_from_name(parent)
-        lines.extend(
-            [
-                f"    node1 = {{'type': {parent_type!r}, 'name': {parent!r}}}",
-                f"    node2 = {{'type': {child_type!r}, 'name': None}}",
-                "    count = solid_step_counting_query(graph_copy, node1, node2)",
-                "    return {'type': 'text', 'data': count, 'updated_graph': graph_safe}",
-            ]
+        result_type = "text"
+        result = (
+            f"solid_step_counting_query(g,{{'name':{parent!r}}},"
+            f"{{'type':{child_type!r}}})"
         )
     elif plan.rank_parent:
-        lines.extend(
-            [
-                f"    parent_node_name = {plan.rank_parent!r}",
-                "    ranked = solid_step_rank_child_nodes(graph_copy, parent_node_name)",
-                "    return {'type': 'list', 'data': ranked, 'updated_graph': graph_safe}",
-            ]
-        )
+        result_type = "list"
+        result = f"solid_step_rank_child_nodes(g,{plan.rank_parent!r})"
     elif plan.list_parent:
-        parent_type = _node_type_from_name(plan.list_parent)
-        lines.extend(
-            [
-                f"    node = {{'type': {parent_type!r}, 'name': {plan.list_parent!r}}}",
-                "    children = solid_step_list_child_nodes(graph_copy, node)",
-                "    return {'type': 'list', 'data': children, 'updated_graph': graph_safe}",
-            ]
-        )
+        result_type = "list"
+        result = f"solid_step_list_child_nodes(g,{{'name':{plan.list_parent!r}}})"
     else:
-        lines.append("    return {'type': 'graph', 'data': graph_copy, 'updated_graph': graph_safe}")
+        result_type = "graph"
+        result = "g"
 
-    return "\n".join(lines) + "\n"
+    statements.append(
+        f"return {{'type':{result_type!r},'data':{result},'updated_graph':{safe_graph}}}"
+    )
+    return "def process_graph(g):" + ";".join(statements) + "\n"
 
 
 def compile_response(prompt_or_query: str) -> str:

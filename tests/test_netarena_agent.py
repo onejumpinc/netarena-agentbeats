@@ -25,7 +25,7 @@ CASES = [
         "and its total physical capacity.",
         "solid_step_rank_child_nodes",
     ),
-    ("Remove ju1.a1.m4.s3c6.p1 from the graph. Return a graph.", "solid_step_remove_node_from_graph"),
+    ("Remove ju1.a1.m4.s3c6.p1 from the graph. Return a graph.", "g.remove_node"),
     ("List all the child nodes of ju1.a1.m4. Return a list of child node names.", "solid_step_list_child_nodes"),
     (
         "Remove ju1.a1.m4.s3c6.p1 from the graph. List direct child nodes of "
@@ -95,18 +95,23 @@ def test_unsafe_mutation_uses_dry_run_and_safe_commit() -> None:
         "Add new_EK_PORT_9 to ju1.a1.m1. Count the EK_PORT in ju1.a1.m1 "
         "in the updated graph. Return the count number as text."
     )
-    assert "mutation_safe = any(" in code
-    assert "parent_type in ('EK_PACKET_SWITCH',)" in code
-    assert "graph_safe = graph_copy if mutation_safe else graph_data" in code
-    assert "solid_step_counting_query(graph_copy" in code
+    assert "s=g.copy()" in code
+    assert "solid_step_add_node_to_graph(g" in code
+    assert "'updated_graph':s" in code
+    assert "solid_step_counting_query(g" in code
 
 
 def test_safe_mutation_commits_result() -> None:
     code = compile_query(
         "Add new node with name new_EK_PORT_9 type EK_PORT, to ju1.a1.m1.s2c2. Return a graph."
     )
-    assert "parent_type in ('EK_PACKET_SWITCH',)" in code
-    assert "allowed_children" not in code
+    assert "s=g.copy()" not in code
+    assert "'updated_graph':g" in code
+
+
+def test_generated_programs_stay_below_transport_size_budget() -> None:
+    programs = [compile_query(query) for query, _ in CASES]
+    assert max(map(len, programs)) < 400
 
 
 def test_prompt_injection_does_not_become_python() -> None:
