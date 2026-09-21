@@ -11,7 +11,9 @@ from typing import Any
 
 import orjson
 import uvicorn
+from uvicorn.protocols.http import httptools_impl
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
+from uvicorn.protocols.http.httptools_impl import RequestResponseCycle
 
 from .compiler import QueryParseError, compile_response
 
@@ -20,8 +22,10 @@ _AGENT_CARD_PATH = "/.well-known/agent-card.json"
 _MAX_REQUEST_BYTES = 1_048_576
 _JSON_CONTENT_TYPE = (b"content-type", b"application/json")
 _TEXT_CONTENT_TYPE = (b"content-type", b"text/plain; charset=utf-8")
+_BINARY_CONTENT_TYPE = (b"content-type", b"application/octet-stream")
 _SSE_CONTENT_TYPE = (b"content-type", b"text/event-stream")
 _CONTENT_TYPES = {
+    "binary": _BINARY_CONTENT_TYPE,
     "json": _JSON_CONTENT_TYPE,
     "text": _TEXT_CONTENT_TYPE,
 }
@@ -30,6 +34,11 @@ _STREAM_MODES = {"off", "close", "hold"}
 _TCP_QUICKACK = (
     getattr(socket, "TCP_QUICKACK", None) if sys.platform.startswith("linux") else None
 )
+_EARLY_HINTS = b"HTTP/1.1 103 Early Hints\r\n\r\n"
+
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _tune_tcp_socket(transport, *, quick_ack: bool) -> None:
@@ -68,6 +77,59 @@ class LowLatencyHttpToolsProtocol(HttpToolsProtocol):
         # immediate ACK again before parsing every newly delivered chunk.
         _tune_tcp_socket(self.transport, quick_ack=True)
         super().data_received(data)
+
+    def on_headers_complete(self) -> None:
+        # Hyper may write request headers and JSON in separate TCP segments.
+        # An informational response carries an immediate ACK plus data, which
+        # prevents the body from waiting on Linux's delayed-ACK timer.
+        if _env_enabled("MALT_EARLY_HINTS") and self.parser.get_method() == b"POST":
+            self.transport.write(_EARLY_HINTS)
+        super().on_headers_complete()
+
+
+class _FirstWriteCoalescingTransport:
+    """Join Uvicorn's response-header and response-body socket writes."""
+
+    def __init__(self, transport) -> None:
+        self._transport = transport
+        self._pending: bytes | None = None
+
+    def write(self, data: bytes) -> None:
+        if self._pending is None:
+            self._pending = bytes(data)
+            return
+        self._transport.write(self._pending + bytes(data))
+        self._pending = None
+
+    def close(self) -> None:
+        if self._pending is not None:
+            self._transport.write(self._pending)
+            self._pending = None
+        self._transport.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._transport, name)
+
+
+class CoalescingRequestResponseCycle(RequestResponseCycle):
+    def __init__(self, *args, transport, **kwargs) -> None:
+        super().__init__(
+            *args,
+            transport=_FirstWriteCoalescingTransport(transport),
+            **kwargs,
+        )
+
+
+class CoalescingLowLatencyHttpToolsProtocol(LowLatencyHttpToolsProtocol):
+    def on_headers_complete(self) -> None:
+        # Uvicorn pins the cycle class as a module global. Swap it only for the
+        # synchronous construction performed by this callback.
+        original = httptools_impl.RequestResponseCycle
+        httptools_impl.RequestResponseCycle = CoalescingRequestResponseCycle
+        try:
+            super().on_headers_complete()
+        finally:
+            httptools_impl.RequestResponseCycle = original
 
 
 def _card_url(host: str, port: int, explicit: str | None) -> str:
@@ -110,7 +172,7 @@ def _agent_card(
             }
         ],
         "url": _card_url(host, port, card_url),
-        "version": "1.3.4",
+        "version": "1.3.5",
     }
 
 
@@ -377,13 +439,20 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--card-url")
     args = parser.parse_args()
+    protocol = (
+        CoalescingLowLatencyHttpToolsProtocol
+        if _env_enabled("MALT_COALESCE_WRITES")
+        else LowLatencyHttpToolsProtocol
+    )
     uvicorn.run(
         build_app(args.host, args.port, args.card_url),
         host=args.host,
         port=args.port,
         access_log=False,
         loop="uvloop",
-        http=LowLatencyHttpToolsProtocol,
+        http=protocol,
+        date_header=False,
+        server_header=False,
     )
     return 0
 

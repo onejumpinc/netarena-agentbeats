@@ -247,6 +247,35 @@ def test_message_can_use_text_content_type_without_changing_jsonrpc() -> None:
     assert compile_query(query) in response.json()["result"]["parts"][0]["text"]
 
 
+def test_message_can_use_binary_content_type_without_changing_jsonrpc() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(
+        build_app("127.0.0.1", 8001, message_content_type="binary")
+    ) as client:
+        response = client.post("/", json=_message_request(query, "rpc-binary"))
+
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.json()["id"] == "rpc-binary"
+    assert compile_query(query) in response.json()["result"]["parts"][0]["text"]
+
+
+def test_coalescing_transport_combines_headers_and_body() -> None:
+    writes: list[bytes] = []
+
+    class FakeTransport:
+        def write(self, data: bytes) -> None:
+            writes.append(data)
+
+        def is_closing(self) -> bool:
+            return False
+
+    transport = agent_server._FirstWriteCoalescingTransport(FakeTransport())
+    transport.write(b"headers")
+    assert writes == []
+    transport.write(b"body")
+    assert writes == [b"headersbody"]
+
+
 @pytest.mark.parametrize(
     ("mode", "card_close", "message_close"),
     [("never", False, False), ("card", True, False), ("always", True, True)],

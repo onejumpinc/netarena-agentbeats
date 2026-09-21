@@ -152,7 +152,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [blocking]
+        variant: [baseline, binary, hints, hints-binary, coalesce, hints-coalesce-binary]
         trial: [1, 2, 3]
     env:
       AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
@@ -182,10 +182,47 @@ jobs:
           set -euo pipefail
           mkdir -p latency-canary
           case "${VARIANT}" in
-            blocking)
+            baseline)
               content_type=text
               connection_close=always
               stream_mode=off
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            binary)
+              content_type=binary
+              connection_close=always
+              stream_mode=off
+              early_hints=0
+              coalesce_writes=0
+              ;;
+            hints)
+              content_type=text
+              connection_close=always
+              stream_mode=off
+              early_hints=1
+              coalesce_writes=0
+              ;;
+            hints-binary)
+              content_type=binary
+              connection_close=always
+              stream_mode=off
+              early_hints=1
+              coalesce_writes=0
+              ;;
+            coalesce)
+              content_type=text
+              connection_close=always
+              stream_mode=off
+              early_hints=0
+              coalesce_writes=1
+              ;;
+            hints-coalesce-binary)
+              content_type=binary
+              connection_close=always
+              stream_mode=off
+              early_hints=1
+              coalesce_writes=1
               ;;
             stream-close)
               content_type=text
@@ -207,6 +244,8 @@ jobs:
             --arg content_type "${content_type}" \
             --arg connection_close "${connection_close}" \
             --arg stream_mode "${stream_mode}" \
+            --arg early_hints "${early_hints}" \
+            --arg coalesce_writes "${coalesce_writes}" \
             '{
               manifest_version: "0.1.0",
               config_schema: {
@@ -223,7 +262,9 @@ jobs:
                   PUBLIC_URL: "http://127.0.0.1:8001/",
                   MALT_RESPONSE_CONTENT_TYPE: $content_type,
                   MALT_CONNECTION_CLOSE: $connection_close,
-                  MALT_STREAM_MODE: $stream_mode
+                  MALT_STREAM_MODE: $stream_mode,
+                  MALT_EARLY_HINTS: $early_hints,
+                  MALT_COALESCE_WRITES: $coalesce_writes
                 },
                 network: {endpoints: [{name: "a2a_endpoint", port: 8001}]}
               },
