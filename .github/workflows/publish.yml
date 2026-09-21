@@ -293,7 +293,11 @@ jobs:
               exit 1
             fi
             response="$(curl -fsS "http://127.0.0.1:${PROXY_PORT}/" || true)"
-            status="$(jq -r '.status // empty' <<<"${response:-{}}")"
+            if [[ -z "${response}" ]] || \
+              ! status="$(jq -r '.status // empty' <<<"${response}" 2>/dev/null)"; then
+              sleep 3
+              continue
+            fi
             if [[ "${status}" == "completed" ]]; then
               jq . <<<"${response}" > latency-canary/results.json
               break
