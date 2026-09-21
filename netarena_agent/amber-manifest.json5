@@ -17,6 +17,13 @@
       // Amber components share a local network namespace. Never advertise the
       // wildcard bind address as an A2A destination.
       PUBLIC_URL: "http://127.0.0.1:8001/",
+      // Preserve JSON-RPC bytes while bypassing Amber's optional JSON body
+      // materialization, and retire the local proxy hop after each response.
+      MALT_RESPONSE_CONTENT_TYPE: "text",
+      MALT_CONNECTION_CLOSE: "always",
+      // A two-segment payload avoids the delayed-ACK band after the evaluator's
+      // long graph-isomorphism checks. Trailing JSON whitespace is semantic-free.
+      MALT_RESPONSE_PAD_BYTES: "2048",
     },
     network: {
       endpoints: [{ name: "a2a_endpoint", port: 8001 }],

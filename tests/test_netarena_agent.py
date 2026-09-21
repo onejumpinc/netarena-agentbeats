@@ -169,6 +169,55 @@ def test_agent_card_uses_blocking_jsonrpc_for_single_response() -> None:
     assert response.json()["capabilities"]["streaming"] is False
 
 
+def test_message_can_use_text_content_type_without_changing_jsonrpc() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(
+        build_app("127.0.0.1", 8001, message_content_type="text")
+    ) as client:
+        card = client.get("/.well-known/agent-card.json")
+        response = client.post("/", json=_message_request(query, "rpc-text"))
+
+    assert card.headers["content-type"] == "application/json"
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.json()["id"] == "rpc-text"
+    assert compile_query(query) in response.json()["result"]["parts"][0]["text"]
+
+
+def test_response_padding_preserves_jsonrpc_payload() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(build_app("127.0.0.1", 8001, response_pad_bytes=2048)) as client:
+        response = client.post("/", json=_message_request(query, "rpc-padded"))
+
+    assert len(response.content) == 2048
+    assert response.json()["id"] == "rpc-padded"
+    assert compile_query(query) in response.json()["result"]["parts"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "card_close", "message_close"),
+    [("never", False, False), ("card", True, False), ("always", True, True)],
+)
+def test_connection_close_modes(
+    mode: str, card_close: bool, message_close: bool
+) -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    with TestClient(build_app("127.0.0.1", 8001, connection_close=mode)) as client:
+        card = client.get("/.well-known/agent-card.json")
+        response = client.post("/", json=_message_request(query))
+
+    assert (card.headers.get("connection") == "close") is card_close
+    assert (response.headers.get("connection") == "close") is message_close
+
+
+def test_invalid_transport_mode_fails_at_startup() -> None:
+    with pytest.raises(ValueError, match="MALT_RESPONSE_CONTENT_TYPE"):
+        build_app(message_content_type="invalid")
+    with pytest.raises(ValueError, match="MALT_CONNECTION_CLOSE"):
+        build_app(connection_close="invalid")
+    with pytest.raises(ValueError, match="MALT_RESPONSE_PAD_BYTES"):
+        build_app(response_pad_bytes=-1)
+
+
 def test_tcp_tuning_enables_nodelay_and_rearms_quickack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,21 +270,30 @@ def test_fast_a2a_rejects_unsupported_jsonrpc_method() -> None:
 
 def _base_graph() -> nx.DiGraph:
     graph = nx.DiGraph()
-    graph.add_node(1, name="ju1", type="EK_JUPITER")
-    graph.add_node(2, name="ju1.sb1", type="EK_SUPERBLOCK")
-    graph.add_node(3, name="ju1.a1.m1", type="EK_AGG_BLOCK")
-    graph.add_node(4, name="ju1.a1.m1.s2c2", type="EK_PACKET_SWITCH")
-    graph.add_node(5, name="ju1.a1.m1.s2c2.p1", type="EK_PORT", physical_capacity_bps=1000)
-    graph.add_edge(1, 2, type="RK_CONTAINS")
-    graph.add_edge(2, 3, type="RK_CONTAINS")
-    graph.add_edge(3, 4, type="RK_CONTAINS")
-    graph.add_edge(4, 5, type="RK_CONTAINS")
+    graph.add_node("ju1", name="ju1", type="EK_JUPITER")
+    graph.add_node("ju1.sb1", name="ju1.sb1", type="EK_SUPERBLOCK")
+    graph.add_node("ju1.a1.m1", name="ju1.a1.m1", type="EK_AGG_BLOCK")
+    graph.add_node(
+        "ju1.a1.m1.s2c2", name="ju1.a1.m1.s2c2", type="EK_PACKET_SWITCH"
+    )
+    graph.add_node(
+        "ju1.a1.m1.s2c2.p1",
+        name="ju1.a1.m1.s2c2.p1",
+        type="EK_PORT",
+        physical_capacity_bps=1000,
+    )
+    graph.add_edge("ju1", "ju1.sb1", type="RK_CONTAINS")
+    graph.add_edge("ju1.sb1", "ju1.a1.m1", type="RK_CONTAINS")
+    graph.add_edge("ju1.a1.m1", "ju1.a1.m1.s2c2", type="RK_CONTAINS")
+    graph.add_edge(
+        "ju1.a1.m1.s2c2", "ju1.a1.m1.s2c2.p1", type="RK_CONTAINS"
+    )
     return graph
 
 
 def _run_graph_program(query: str, graph: nx.DiGraph) -> dict[str, object]:
     def add_node(graph_data, new_node, parent_node_name):
-        new_id = max(graph_data.nodes) + 1
+        new_id = new_node["name"]
         attrs = dict(new_node)
         if attrs["type"] == "EK_PORT":
             attrs["physical_capacity_bps"] = 1000
@@ -262,13 +320,18 @@ def _run_graph_program(query: str, graph: nx.DiGraph) -> dict[str, object]:
     return namespace["process_graph"](graph.copy())
 
 
+def _updated_graph(result: dict[str, object]) -> nx.Graph:
+    updated = result["updated_graph"]
+    return updated if isinstance(updated, nx.Graph) else nx.node_link_graph(updated)
+
+
 def test_missing_parent_is_rejected_from_safe_state_at_runtime() -> None:
     result = _run_graph_program(
         "Add new node with name new_EK_PORT_9 type EK_PORT, to missing.s1c1. Return a graph.",
         _base_graph(),
     )
     requested = result["data"]
-    safe = nx.node_link_graph(result["updated_graph"])
+    safe = _updated_graph(result)
     assert len(requested) == 6
     assert len(safe) == 5
     assert not list(nx.isolates(safe))
@@ -280,7 +343,7 @@ def test_switch_removal_cascades_descendants_in_safe_state() -> None:
         _base_graph(),
     )
     requested = result["data"]
-    safe = nx.node_link_graph(result["updated_graph"])
+    safe = _updated_graph(result)
     assert {attrs["name"] for _, attrs in requested.nodes(data=True)} == {
         "ju1",
         "ju1.sb1",

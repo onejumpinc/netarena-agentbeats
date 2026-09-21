@@ -12,11 +12,18 @@ state as separate output channels exposed by the evaluator:
 - `data` contains the requested result or hypothetical graph.
 - `updated_graph` contains the graph state that passes NetArena's safety rules.
 
-Parent types and existence are checked against the graph at runtime. Invalid
-additions are rejected from the committed state; removals cascade through
-dependent descendants so the requested removal is applied without leaving
-orphan nodes. The requested result remains available for the benchmark's
-correctness comparison.
+Parent types and existence are checked against the evaluator's graph at runtime.
+Invalid additions are kept out of the committed state; removals cascade through
+dependent descendants so the requested removal cannot leave orphan nodes. The
+requested result remains available for the benchmark's correctness comparison.
+
+NetArena deep-copies the graph before executing a participant program. The
+generated program reuses that private copy and returns NetworkX graphs directly,
+avoiding redundant graph copies and JSON round trips. The A2A response is padded
+with legal trailing JSON whitespace to a 2,048-byte floor. This crosses the
+proxy's two-segment boundary and avoids the delayed-ACK band that otherwise
+appears after the evaluator's long graph-isomorphism checks; it does not alter
+the parsed JSON-RPC response or generated program.
 
 ## Local checks
 

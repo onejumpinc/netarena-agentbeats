@@ -55,12 +55,40 @@ NetArena client/evaluator with all four supported envelopes (`zeroshot_base`,
 10 templates under every envelope: 40 / 40 correct and 40 / 40 safe, with no
 failures.
 
+## Transport latency assessment
+
+Validated on 2026-09-21 with Amber v0.3 and the official NetArena green-agent
+container. The [packet-size screening run](https://github.com/onejumpinc/netarena-agentbeats/actions/runs/35578163410)
+tested four semantically equivalent JSON-RPC response floors on identical 30-query
+mixed workloads. Every variant passed 30 / 30 correctness and 30 / 30 safety:
+
+| Response floor | Average latency |
+| ---: | ---: |
+| 1,024 bytes | 0.0613981572 s |
+| 1,536 bytes | 0.0577276538 s |
+| 2,048 bytes | 0.0547106041 s |
+| 4,096 bytes | 0.0549172414 s |
+
+The selected 2,048-byte floor was then exercised by a
+[nine-job repeated canary](https://github.com/onejumpinc/netarena-agentbeats/actions/runs/35578641639):
+three mixed-template trials, three sustained add trials, and three sustained
+remove trials. All 270 / 270 queries passed correctness and safety. The mixed
+trial means were 0.0551094702 s, 0.0554046179 s, and 0.0546155729 s. Across
+90 queries each, sustained add averaged 0.0611391735 s and sustained remove
+averaged 0.0652349212 s. Weighting those sustained results with the other eight
+template means gives a balanced ten-template estimate of 0.0544553274 s.
+
+Padding consists solely of trailing JSON whitespace. It preserves the parsed
+JSON-RPC object and generated program while causing Amber's proxy path to emit
+more than one TCP segment after evaluator-induced idle periods.
+
 ## Targeted regression suite
 
-The 24 focused tests cover all live grammar shapes, prompt extraction,
+The 30 focused tests cover all live grammar shapes, prompt extraction,
 runtime graph safety, descendant cleanup, nonexistent parents, wildcard Agent
-Card handling, inert parse failures, blocking A2A responses, and low-latency
-TCP socket tuning. Result: 24 passed.
+Card handling, inert parse failures, blocking A2A responses, content-type and
+connection modes, semantic-preserving padding, and low-latency TCP socket
+tuning. Result: 30 passed.
 
 ## Interpretation
 

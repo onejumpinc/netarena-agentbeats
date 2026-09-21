@@ -19,6 +19,9 @@ UNSUPPORTED_RESPONSE = "Unsupported NetArena MALT request."
 _AGENT_CARD_PATH = "/.well-known/agent-card.json"
 _MAX_REQUEST_BYTES = 1_048_576
 _JSON_CONTENT_TYPE = (b"content-type", b"application/json")
+_TEXT_CONTENT_TYPE = (b"content-type", b"text/plain; charset=utf-8")
+_CONTENT_TYPES = {"json": _JSON_CONTENT_TYPE, "text": _TEXT_CONTENT_TYPE}
+_CONNECTION_CLOSE_MODES = {"never", "card", "always"}
 _TCP_QUICKACK = (
     getattr(socket, "TCP_QUICKACK", None) if sys.platform.startswith("linux") else None
 )
@@ -96,7 +99,7 @@ def _agent_card(host: str, port: int, card_url: str | None) -> dict[str, Any]:
             }
         ],
         "url": _card_url(host, port, card_url),
-        "version": "1.3.1",
+        "version": "1.5.0",
     }
 
 
@@ -109,8 +112,42 @@ class FastA2AApplication:
     fast path preserves the A2A wire schema while avoiding that machinery.
     """
 
-    def __init__(self, card: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        card: Mapping[str, Any],
+        *,
+        message_content_type: str = "json",
+        connection_close: str = "never",
+        response_pad_bytes: int = 0,
+    ) -> None:
         self._card = orjson.dumps(card)
+        try:
+            self._message_content_type = _CONTENT_TYPES[message_content_type]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported MALT_RESPONSE_CONTENT_TYPE: {message_content_type!r}"
+            ) from exc
+        if connection_close not in _CONNECTION_CLOSE_MODES:
+            raise ValueError(
+                f"unsupported MALT_CONNECTION_CLOSE: {connection_close!r}"
+            )
+        self._connection_close = connection_close
+        if response_pad_bytes < 0:
+            raise ValueError("MALT_RESPONSE_PAD_BYTES must be non-negative")
+        self._response_pad_bytes = response_pad_bytes
+
+    def _pad_payload(self, payload: bytes) -> bytes:
+        """Pad below-MSS JSON so Amber forwards it in multiple TCP segments.
+
+        The official evaluator performs long graph checks between requests.
+        After those idle periods, a single small proxy frame repeatedly incurs
+        Linux's delayed-ACK timer. JSON permits trailing whitespace, so an
+        exact lower-bound size changes only packetization, never the A2A value.
+        """
+
+        if len(payload) >= self._response_pad_bytes:
+            return payload
+        return payload + b" " * (self._response_pad_bytes - len(payload))
 
     async def __call__(self, scope: dict, receive, send) -> None:
         scope_type = scope["type"]
@@ -129,7 +166,12 @@ class FastA2AApplication:
         method = scope["method"]
         path = scope["path"]
         if method == "GET" and path == _AGENT_CARD_PATH:
-            await self._send(send, 200, self._card)
+            await self._send(
+                send,
+                200,
+                self._card,
+                close=self._connection_close in {"card", "always"},
+            )
             return
         if method != "POST" or path != "/":
             await self._send(send, 404, b'{"detail":"Not Found"}')
@@ -189,48 +231,97 @@ class FastA2AApplication:
 
             # The incoming JSON-RPC id is already unique for every official
             # client call, so it can safely identify this one response Message.
-            payload = orjson.dumps(
-                {
-                    "id": rpc_id,
-                    "jsonrpc": "2.0",
-                    "result": {
-                        "kind": "message",
-                        "messageId": str(rpc_id),
-                        "parts": [{"kind": "text", "text": answer}],
-                        "role": "agent",
-                    },
-                }
+            payload = self._pad_payload(
+                orjson.dumps(
+                    {
+                        "id": rpc_id,
+                        "jsonrpc": "2.0",
+                        "result": {
+                            "kind": "message",
+                            "messageId": str(rpc_id),
+                            "parts": [{"kind": "text", "text": answer}],
+                            "role": "agent",
+                        },
+                    }
+                )
             )
-            await self._send(send, 200, payload)
+            await self._send(
+                send,
+                200,
+                payload,
+                content_type=self._message_content_type,
+                close=self._connection_close == "always",
+            )
         except (KeyError, TypeError, ValueError, orjson.JSONDecodeError):
-            payload = orjson.dumps(
-                {
-                    "id": rpc_id,
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32600, "message": "Invalid Request"},
-                }
+            payload = self._pad_payload(
+                orjson.dumps(
+                    {
+                        "id": rpc_id,
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    }
+                )
             )
-            await self._send(send, 200, payload)
+            await self._send(
+                send,
+                200,
+                payload,
+                content_type=self._message_content_type,
+                close=self._connection_close == "always",
+            )
 
     @staticmethod
-    async def _send(send, status: int, body: bytes) -> None:
+    async def _send(
+        send,
+        status: int,
+        body: bytes,
+        *,
+        content_type: tuple[bytes, bytes] = _JSON_CONTENT_TYPE,
+        close: bool = False,
+    ) -> None:
+        headers = [
+            content_type,
+            (b"content-length", str(len(body)).encode("ascii")),
+        ]
+        if close:
+            headers.append((b"connection", b"close"))
         await send(
             {
                 "type": "http.response.start",
                 "status": status,
-                "headers": [
-                    _JSON_CONTENT_TYPE,
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
+                "headers": headers,
             }
         )
         await send({"type": "http.response.body", "body": body})
 
 
 def build_app(
-    host: str = "0.0.0.0", port: int = 8001, card_url: str | None = None
+    host: str = "0.0.0.0",
+    port: int = 8001,
+    card_url: str | None = None,
+    *,
+    message_content_type: str | None = None,
+    connection_close: str | None = None,
+    response_pad_bytes: int | None = None,
 ) -> FastA2AApplication:
-    return FastA2AApplication(_agent_card(host, port, card_url))
+    return FastA2AApplication(
+        _agent_card(host, port, card_url),
+        message_content_type=(
+            message_content_type
+            if message_content_type is not None
+            else os.environ.get("MALT_RESPONSE_CONTENT_TYPE", "json").strip().lower()
+        ),
+        connection_close=(
+            connection_close
+            if connection_close is not None
+            else os.environ.get("MALT_CONNECTION_CLOSE", "never").strip().lower()
+        ),
+        response_pad_bytes=(
+            response_pad_bytes
+            if response_pad_bytes is not None
+            else int(os.environ.get("MALT_RESPONSE_PAD_BYTES", "0").strip())
+        ),
+    )
 
 
 def main() -> int:
@@ -246,6 +337,8 @@ def main() -> int:
         access_log=False,
         loop="uvloop",
         http=LowLatencyHttpToolsProtocol,
+        date_header=False,
+        server_header=False,
     )
     return 0
 
