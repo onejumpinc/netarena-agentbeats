@@ -202,7 +202,10 @@ def compile_query(prompt_or_query: str) -> str:
     """Compile a public MALT request into evaluator-compatible Python code."""
 
     plan = parse_query(prompt_or_query)
-    lines = ["def process_graph(graph_data):", "    graph_copy = graph_data.copy()"]
+    # NetArena invokes process_graph(copy.deepcopy(G)), so the input is already
+    # isolated from the benchmark's canonical graph. Reusing that private copy
+    # avoids a second full 5,493-node copy on every query.
+    lines = ["def process_graph(graph_data):", "    graph_copy = graph_data"]
 
     if plan.add:
         allowed_parents = ALLOWED_PARENTS.get(plan.add.node_type, ())
@@ -210,9 +213,10 @@ def compile_query(prompt_or_query: str) -> str:
             [
                 f"    new_node = {{'name': {plan.add.name!r}, 'type': {plan.add.node_type!r}}}",
                 f"    parent_node_name = {plan.add.parent!r}",
-                "    graph_copy = solid_step_add_node_to_graph(graph_copy, new_node, parent_node_name)",
-                "    parent_types = next((attrs.get('type', []) for _, attrs in graph_data.nodes(data=True) if attrs.get('name') == parent_node_name), [])",
+                "    parent_types = graph_data.nodes[parent_node_name].get('type', []) if parent_node_name in graph_data else next((attrs.get('type', []) for _, attrs in graph_data.nodes(data=True) if attrs.get('name') == parent_node_name), [])",
                 f"    mutation_safe = any(parent_type in {allowed_parents!r} for parent_type in ([parent_types] if isinstance(parent_types, str) else parent_types))",
+                "    graph_copy = graph_data if mutation_safe else graph_data.copy()",
+                "    graph_copy = solid_step_add_node_to_graph(graph_copy, new_node, parent_node_name)",
                 "    graph_safe = graph_copy if mutation_safe else graph_data",
             ]
         )
@@ -220,24 +224,16 @@ def compile_query(prompt_or_query: str) -> str:
         lines.extend(
             [
                 f"    child_node_name = {plan.remove!r}",
-                "    removed_descendants = set()",
-                "    for candidate_id, candidate_attrs in graph_data.nodes(data=True):",
-                "        if candidate_attrs.get('name') == child_node_name:",
-                "            removed_descendants = nx.descendants(graph_data, candidate_id)",
-                "            break",
+                "    child_node_id = child_node_name if child_node_name in graph_data else next((candidate_id for candidate_id, attrs in graph_data.nodes(data=True) if attrs.get('name') == child_node_name), None)",
+                "    removed_descendants = nx.descendants(graph_data, child_node_id) if child_node_id is not None else set()",
                 "    graph_copy = solid_step_remove_node_from_graph(graph_copy, child_node_name)",
-                "    graph_safe = graph_copy.copy()",
-                "    graph_safe.remove_nodes_from(removed_descendants)",
+                "    graph_safe = graph_copy if not removed_descendants else graph_copy.copy()",
+                "    if removed_descendants:",
+                "        graph_safe.remove_nodes_from(removed_descendants)",
             ]
         )
     else:
         lines.append("    graph_safe = graph_copy")
-
-    lines.extend(
-        [
-            "    graph_json = nx.readwrite.json_graph.node_link_data(graph_safe)",
-        ]
-    )
 
     if plan.count:
         child_type, parent = plan.count
@@ -247,7 +243,7 @@ def compile_query(prompt_or_query: str) -> str:
                 f"    node1 = {{'type': {parent_type!r}, 'name': {parent!r}}}",
                 f"    node2 = {{'type': {child_type!r}, 'name': None}}",
                 "    count = solid_step_counting_query(graph_copy, node1, node2)",
-                "    return {'type': 'text', 'data': count, 'updated_graph': graph_json}",
+                "    return {'type': 'text', 'data': count, 'updated_graph': graph_safe}",
             ]
         )
     elif plan.rank_parent:
@@ -255,7 +251,7 @@ def compile_query(prompt_or_query: str) -> str:
             [
                 f"    parent_node_name = {plan.rank_parent!r}",
                 "    ranked = solid_step_rank_child_nodes(graph_copy, parent_node_name)",
-                "    return {'type': 'list', 'data': ranked, 'updated_graph': graph_json}",
+                "    return {'type': 'list', 'data': ranked, 'updated_graph': graph_safe}",
             ]
         )
     elif plan.list_parent:
@@ -264,11 +260,11 @@ def compile_query(prompt_or_query: str) -> str:
             [
                 f"    node = {{'type': {parent_type!r}, 'name': {plan.list_parent!r}}}",
                 "    children = solid_step_list_child_nodes(graph_copy, node)",
-                "    return {'type': 'list', 'data': children, 'updated_graph': graph_json}",
+                "    return {'type': 'list', 'data': children, 'updated_graph': graph_safe}",
             ]
         )
     else:
-        lines.append("    return {'type': 'graph', 'data': graph_copy, 'updated_graph': graph_json}")
+        lines.append("    return {'type': 'graph', 'data': graph_copy, 'updated_graph': graph_safe}")
 
     return "\n".join(lines) + "\n"
 

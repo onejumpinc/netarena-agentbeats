@@ -365,13 +365,18 @@ def _run_graph_program(query: str, graph: nx.DiGraph) -> dict[str, object]:
     return namespace["process_graph"](graph.copy())
 
 
+def _updated_graph(result: dict[str, object]) -> nx.Graph:
+    updated = result["updated_graph"]
+    return updated if isinstance(updated, nx.Graph) else nx.node_link_graph(updated)
+
+
 def test_missing_parent_is_rejected_from_safe_state_at_runtime() -> None:
     result = _run_graph_program(
         "Add new node with name new_EK_PORT_9 type EK_PORT, to missing.s1c1. Return a graph.",
         _base_graph(),
     )
     requested = result["data"]
-    safe = nx.node_link_graph(result["updated_graph"])
+    safe = _updated_graph(result)
     assert len(requested) == 6
     assert len(safe) == 5
     assert not list(nx.isolates(safe))
@@ -383,7 +388,7 @@ def test_switch_removal_cascades_descendants_in_safe_state() -> None:
         _base_graph(),
     )
     requested = result["data"]
-    safe = nx.node_link_graph(result["updated_graph"])
+    safe = _updated_graph(result)
     assert {attrs["name"] for _, attrs in requested.nodes(data=True)} == {
         "ju1",
         "ju1.sb1",
