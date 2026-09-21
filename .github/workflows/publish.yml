@@ -3,7 +3,7 @@ name: test-and-publish
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/malt-transport-canary]
     paths:
       - ".github/workflows/publish.yml"
       - "netarena_agent/Dockerfile"
@@ -143,7 +143,9 @@ jobs:
         run: echo '`${{ steps.build.outputs.digest }}`' >> "$GITHUB_STEP_SUMMARY"
 
   latency-canary:
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/codex/malt-transport-canary'
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 25
