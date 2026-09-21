@@ -152,9 +152,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [pad-1024, pad-1536, pad-2048, pad-4096, stream-task, stream-task-pad-2048, stream-task-h11, blocking-h11]
-        workload: [mixed]
-        trial: [1]
+        variant: [pad-2048]
+        workload: [mixed, add, remove]
+        trial: [1, 2, 3]
     env:
       AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
       COMPOSE_PROJECT: malt-canary-${{ github.run_id }}-${{ matrix.variant }}-${{ matrix.workload }}-${{ matrix.trial }}
