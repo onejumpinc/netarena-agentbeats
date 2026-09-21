@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import json
 import socket
 
 import networkx as nx
@@ -126,11 +128,15 @@ def test_error_response_never_reflects_executable_input() -> None:
     assert "process_graph" not in UNSUPPORTED_RESPONSE
 
 
-def _message_request(text: str, request_id: str = "test-request") -> dict:
+def _message_request(
+    text: str,
+    request_id: str = "test-request",
+    method: str = "message/send",
+) -> dict:
     return {
         "id": request_id,
         "jsonrpc": "2.0",
-        "method": "message/send",
+        "method": method,
         "params": {
             "configuration": {"acceptedOutputModes": [], "blocking": True},
             "message": {
@@ -169,6 +175,58 @@ def test_agent_card_uses_blocking_jsonrpc_for_single_response() -> None:
     assert response.json()["capabilities"]["streaming"] is False
 
 
+@pytest.mark.parametrize("mode", ["close", "hold"])
+def test_stream_mode_is_advertised(mode: str) -> None:
+    with TestClient(build_app("127.0.0.1", 8001, stream_mode=mode)) as client:
+        response = client.get("/.well-known/agent-card.json")
+
+    assert response.json()["capabilities"]["streaming"] is True
+
+
+def test_closed_stream_returns_one_a2a_sse_message() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    request = _message_request(query, "rpc-stream", "message/stream")
+    with TestClient(build_app("127.0.0.1", 8001, stream_mode="close")) as client:
+        response = client.post("/", json=request)
+
+    assert response.headers["content-type"] == "text/event-stream"
+    assert response.text.startswith("data: ")
+    payload = json.loads(response.text.removeprefix("data: ").strip())
+    assert payload["id"] == "rpc-stream"
+    assert compile_query(query) in payload["result"]["parts"][0]["text"]
+
+
+def test_held_stream_waits_for_client_disconnect_after_first_message() -> None:
+    query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
+    body = json.dumps(
+        _message_request(query, "rpc-hold", "message/stream")
+    ).encode()
+    incoming = iter(
+        [
+            {"type": "http.request", "body": body, "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+    )
+    outgoing: list[dict] = []
+
+    async def receive() -> dict:
+        return next(incoming)
+
+    async def send(event: dict) -> None:
+        outgoing.append(event)
+
+    async def exercise() -> None:
+        await build_app("127.0.0.1", 8001, stream_mode="hold")(
+            {"type": "http", "method": "POST", "path": "/"}, receive, send
+        )
+
+    asyncio.run(exercise())
+    assert outgoing[0]["type"] == "http.response.start"
+    assert (b"content-type", b"text/event-stream") in outgoing[0]["headers"]
+    assert outgoing[1]["more_body"] is True
+    assert outgoing[1]["body"].startswith(b"data: ")
+
+
 def test_message_can_use_text_content_type_without_changing_jsonrpc() -> None:
     query = "List all the child nodes of ju1.a1.m4. Return a list of child node names."
     with TestClient(
@@ -204,6 +262,8 @@ def test_invalid_transport_canary_mode_fails_at_startup() -> None:
         build_app(message_content_type="invalid")
     with pytest.raises(ValueError, match="MALT_CONNECTION_CLOSE"):
         build_app(connection_close="invalid")
+    with pytest.raises(ValueError, match="MALT_STREAM_MODE"):
+        build_app(stream_mode="invalid")
 
 
 def test_tcp_tuning_enables_nodelay_and_rearms_quickack(

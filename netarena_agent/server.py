@@ -20,11 +20,13 @@ _AGENT_CARD_PATH = "/.well-known/agent-card.json"
 _MAX_REQUEST_BYTES = 1_048_576
 _JSON_CONTENT_TYPE = (b"content-type", b"application/json")
 _TEXT_CONTENT_TYPE = (b"content-type", b"text/plain; charset=utf-8")
+_SSE_CONTENT_TYPE = (b"content-type", b"text/event-stream")
 _CONTENT_TYPES = {
     "json": _JSON_CONTENT_TYPE,
     "text": _TEXT_CONTENT_TYPE,
 }
 _CONNECTION_CLOSE_MODES = {"never", "card", "always"}
+_STREAM_MODES = {"off", "close", "hold"}
 _TCP_QUICKACK = (
     getattr(socket, "TCP_QUICKACK", None) if sys.platform.startswith("linux") else None
 )
@@ -80,9 +82,15 @@ def _card_url(host: str, port: int, explicit: str | None) -> str:
     return f"http://{host}:{port}/"
 
 
-def _agent_card(host: str, port: int, card_url: str | None) -> dict[str, Any]:
+def _agent_card(
+    host: str,
+    port: int,
+    card_url: str | None,
+    *,
+    streaming: bool = False,
+) -> dict[str, Any]:
     return {
-        "capabilities": {"streaming": False},
+        "capabilities": {"streaming": streaming},
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
         "description": "Deterministic and safety-aware participant for NetArena MALT",
@@ -102,7 +110,7 @@ def _agent_card(host: str, port: int, card_url: str | None) -> dict[str, Any]:
             }
         ],
         "url": _card_url(host, port, card_url),
-        "version": "1.3.2",
+        "version": "1.3.3",
     }
 
 
@@ -121,6 +129,7 @@ class FastA2AApplication:
         *,
         message_content_type: str = "json",
         connection_close: str = "never",
+        stream_mode: str = "off",
     ) -> None:
         self._card = orjson.dumps(card)
         try:
@@ -134,6 +143,9 @@ class FastA2AApplication:
                 f"unsupported MALT_CONNECTION_CLOSE: {connection_close!r}"
             )
         self._connection_close = connection_close
+        if stream_mode not in _STREAM_MODES:
+            raise ValueError(f"unsupported MALT_STREAM_MODE: {stream_mode!r}")
+        self._stream_mode = stream_mode
 
     async def __call__(self, scope: dict, receive, send) -> None:
         scope_type = scope["type"]
@@ -186,9 +198,12 @@ class FastA2AApplication:
             if not isinstance(request, dict):
                 raise TypeError("request must be an object")
             rpc_id = request.get("id")
+            expected_method = (
+                "message/stream" if self._stream_mode != "off" else "message/send"
+            )
             if (
                 request.get("jsonrpc") != "2.0"
-                or request.get("method") != "message/send"
+                or request.get("method") != expected_method
                 or not isinstance(rpc_id, (str, int))
             ):
                 raise ValueError("invalid JSON-RPC envelope")
@@ -229,13 +244,21 @@ class FastA2AApplication:
                     },
                 }
             )
-            await self._send(
-                send,
-                200,
-                payload,
-                content_type=self._message_content_type,
-                close=self._connection_close == "always",
-            )
+            if self._stream_mode == "off":
+                await self._send(
+                    send,
+                    200,
+                    payload,
+                    content_type=self._message_content_type,
+                    close=self._connection_close == "always",
+                )
+            else:
+                await self._send_sse(
+                    receive,
+                    send,
+                    payload,
+                    hold_open=self._stream_mode == "hold",
+                )
         except (KeyError, TypeError, ValueError, orjson.JSONDecodeError):
             payload = orjson.dumps(
                 {
@@ -251,6 +274,35 @@ class FastA2AApplication:
                 content_type=self._message_content_type,
                 close=self._connection_close == "always",
             )
+
+    @staticmethod
+    async def _send_sse(receive, send, payload: bytes, *, hold_open: bool) -> None:
+        """Emit one valid A2A SSE Message, optionally awaiting client teardown.
+
+        The v0.3 A2A client returns as soon as a streamed endpoint yields a
+        Message. Keeping that one-event stream open makes its response context
+        retire the Green-to-Amber connection instead of reusing it after the
+        evaluator's long graph-processing pauses.
+        """
+
+        headers = [
+            _SSE_CONTENT_TYPE,
+            (b"cache-control", b"no-cache"),
+        ]
+        await send({"type": "http.response.start", "status": 200, "headers": headers})
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"data: " + payload + b"\n\n",
+                "more_body": hold_open,
+            }
+        )
+        if not hold_open:
+            return
+        while True:
+            event = await receive()
+            if event["type"] == "http.disconnect":
+                return
 
     @staticmethod
     async def _send(
@@ -284,9 +336,20 @@ def build_app(
     *,
     message_content_type: str | None = None,
     connection_close: str | None = None,
+    stream_mode: str | None = None,
 ) -> FastA2AApplication:
+    resolved_stream_mode = (
+        stream_mode
+        if stream_mode is not None
+        else os.environ.get("MALT_STREAM_MODE", "off").strip().lower()
+    )
     return FastA2AApplication(
-        _agent_card(host, port, card_url),
+        _agent_card(
+            host,
+            port,
+            card_url,
+            streaming=resolved_stream_mode != "off",
+        ),
         message_content_type=(
             message_content_type
             if message_content_type is not None
@@ -297,6 +360,7 @@ def build_app(
             if connection_close is not None
             else os.environ.get("MALT_CONNECTION_CLOSE", "never").strip().lower()
         ),
+        stream_mode=resolved_stream_mode,
     )
 
 

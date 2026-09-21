@@ -152,11 +152,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        content_type: [json, text]
-        connection_close: [never, card, always]
+        variant: [blocking, stream-close, stream-hold]
+        trial: [1, 2, 3]
     env:
       AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
-      COMPOSE_PROJECT: malt-canary-${{ github.run_id }}-${{ matrix.content_type }}-${{ matrix.connection_close }}
+      COMPOSE_PROJECT: malt-canary-${{ github.run_id }}-${{ matrix.variant }}-${{ matrix.trial }}
       PROXY_PORT: "18080"
       PURPLE_IMAGE: ghcr.io/${{ github.repository_owner }}/netarena-malt-agent@${{ needs.publish.outputs.image_digest }}
     steps:
@@ -177,15 +177,36 @@ jobs:
       - name: Build 30-query canary scenario
         shell: bash
         env:
-          CONTENT_TYPE: ${{ matrix.content_type }}
-          CONNECTION_CLOSE: ${{ matrix.connection_close }}
+          VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
           mkdir -p latency-canary
+          case "${VARIANT}" in
+            blocking)
+              content_type=text
+              connection_close=always
+              stream_mode=off
+              ;;
+            stream-close)
+              content_type=text
+              connection_close=never
+              stream_mode=close
+              ;;
+            stream-hold)
+              content_type=text
+              connection_close=never
+              stream_mode=hold
+              ;;
+            *)
+              echo "unknown canary variant: ${VARIANT}" >&2
+              exit 1
+              ;;
+          esac
           jq -n \
             --arg image "${PURPLE_IMAGE}" \
-            --arg content_type "${CONTENT_TYPE}" \
-            --arg connection_close "${CONNECTION_CLOSE}" \
+            --arg content_type "${content_type}" \
+            --arg connection_close "${connection_close}" \
+            --arg stream_mode "${stream_mode}" \
             '{
               manifest_version: "0.1.0",
               config_schema: {
@@ -201,7 +222,8 @@ jobs:
                   PYTHONUNBUFFERED: "1",
                   PUBLIC_URL: "http://127.0.0.1:8001/",
                   MALT_RESPONSE_CONTENT_TYPE: $content_type,
-                  MALT_CONNECTION_CLOSE: $connection_close
+                  MALT_CONNECTION_CLOSE: $connection_close,
+                  MALT_STREAM_MODE: $stream_mode
                 },
                 network: {endpoints: [{name: "a2a_endpoint", port: 8001}]}
               },
@@ -317,7 +339,7 @@ jobs:
       - name: Verify and summarize canary
         shell: bash
         env:
-          VARIANT: ${{ matrix.content_type }}-${{ matrix.connection_close }}
+          VARIANT: ${{ matrix.variant }}-${{ matrix.trial }}
         run: |
           set -euo pipefail
           jq -e '
@@ -348,5 +370,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: latency-${{ matrix.content_type }}-${{ matrix.connection_close }}
+          name: latency-${{ matrix.variant }}-${{ matrix.trial }}
           path: latency-canary/results.json
